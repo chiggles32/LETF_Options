@@ -283,7 +283,9 @@ sample_df = ctest |>
   filter(Expiry == "2023-11-10", QuoteTime == 1698674472) |>
   rowwise() |>
   mutate(Moneyness = if_else(Strike > S01, abs(LM1), -abs(LM1)),
-         ImpVol = if_else( (is.na(IV1) | is.na(IV2) ), sum(IV1,IV2, na.rm = TRUE) , sum(IV1, IV2) / 2 ) ) |>
+         ImpVol = if_else( (is.na(IV1) | is.na(IV2) ), sum(IV1,IV2, na.rm = TRUE) , sum(IV1, IV2) / 2 )
+         # Moneyness = if_else(U == "SQQQ", -Moneyness, Moneyness)
+         ) |>
   ungroup() |>
   mutate(ID = row_number()) |>
   select(-IV1, -IV2, -LM1, -LM2) 
@@ -351,30 +353,31 @@ rdf = Q |>
          Simple_Ret.1 = (End_Price.1 - Start_Price.1)/Start_Price.1,
          SRet_Dif = abs(Simple_Ret - Simple_Ret.1),
          LongShort = if_else(
-           ImpVol > ImpVol.1,
+           ImpVol < ImpVol.1,
            paste(sub("\\d.*", "", C1), sub("\\d.*", "", C1.1), sep = ">"),
            paste(sub("\\d.*", "", C1.1), sub("\\d.*", "", C1), sep = ">")
          )) 
   
 
 
-tr = rdf |>
-  filter(M_Dif < .001, RP_Dif > 0, abs(Moneyness) > .02)
+ tr = rdf #|>
+   #filter(M_Dif < .002, abs(Moneyness) < .025)
 
 tr = tr |>
+  filter(grepl("SQQQ", tr$LongShort)) |>
   mutate(LS_Ret = if_else(ImpVol > ImpVol.1,
                           (-Simple_Ret + Simple_Ret.1)/2,
                           (Simple_Ret - Simple_Ret.1)/2))
 
-model = lm(LS_Ret ~ IV_Dif + M_Dif + RP_Dif + TTE + IV_Dif * RP_Dif * TTE , data = tr)
+model = lm(LS_Ret ~ IV_Dif + M_Dif + RP_Dif  + IV_Dif * RP_Dif  , data = tr)
 summary(model)
 par(mfrow=c(2,2)) # Set up the plotting area to display 4 plots at once
 plot(model) 
 
-###Why oh why 
+# how to accurately map the moneyness difference for sqqq because of opposite direction
 
 tr |>
-  filter(LS_Ret > 0) |>
+  filter(LS_Ret != 0) |>
   ggplot( aes(x = IV_Dif, y = LS_Ret, color = LongShort)) +
   geom_point()
 
