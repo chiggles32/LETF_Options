@@ -1,0 +1,933 @@
+---
+title: "Leveraged ETFs and Their Attributes"
+author: "Charlie Lucas"
+date: "2023-10-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## What is a Leveraged ETF?
+
+
+#### Spence, John (May 29, 2006). "ProFunds readies first leveraged ETFs - ETF Investing". MarketWatch.
+In the world of modern finance, almost anything you can possibly think of can be made into an exchange trade-able financial instrument. Do you think that Jim Cramer is always wrong? There is an ETF for that (seriously look it up). Do you think that humans are inherently flawed? There is an ETF that tracks stocks dealing with vices. Do you want leverage without the headaches? There are leveraged exchange traded funds (LETFs) for that. LETFs have been around for almost 18 years, with the first fund being created in 2006. In essence, these funds provide exposure to a benchmark index return multiplied by its leverage factor that is often denoted as $\beta$. The most common $\beta$s are (-)1.5, (-)2, and (-)3. A $\beta$ of 3 means that the LETFs investment objective is to provide 3x the daily return of its benchmark. This is achieved through the use of derivatives. You can find specifics of how each fund works in their prospectus. Some example tickers are TQQQ (3x daily NASDAQ 100 Index returns), FBL (1.5x daily Meta returns), and SDOW (-3x DJIA daily returns). You will notice that not only are there LETFs tracking indices, but also single stocks as well as specific sectors. 
+
+Since 2006, there has been a good amount of research into the dynamics underlying LETFs. For in-depth commentary on the inner-workings of these types of funds, I recommend the paper by M. Cheng and A. Madhavan. They touch upon everything from the effect of rebalancing on index volatility, hedging mechanisms, all the way to the stochastic calculus behind the properties we see with LETFs. The goal of this paper is to explore the differences behind the theory laid out in some of these papers and actual market data. 
+
+### Data
+
+All of the data that is analysed in this paper is directly from Yahoo! Finance, either through the use of the R package quantmod (for ETF prices), or directly webscraping intraday prices (for options chains). The code will be provided somewhere along with this article.
+
+
+## Historical Testing
+
+First, let us take a quick look at the actual performance of an LETF versus its benchmark. For the purposes of this paper, we will be focusing on LETFs TQQQ (3x) and SQQQ (-3x), as well as the index ETF QQQ. Their high $\beta$s make it easier to distinguish the relationships we will be looking for.
+
+```{r,  echo=FALSE, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(ggridges)
+library(PerformanceAnalytics)
+library(quantmod)
+library(formattable)
+library(rvest)
+library(lubridate)
+library(bizdays)
+library(quantmod)
+library(plotly)
+library(kableExtra)
+library(gganimate)
+library(gifski)
+library(gridExtra)
+
+
+#LETF vs Index
+
+invisible(getSymbols("TQQQ", from = "2018-01-01", to = Sys.Date()))
+invisible(getSymbols("SQQQ", from = "2018-01-01", to = Sys.Date()))
+invisible(getSymbols("QQQ", from = "2018-01-01", to = Sys.Date()))
+
+TQQQ = Return.calculate(TQQQ[,6], method = "log")[-1]
+SQQQ = Return.calculate(SQQQ[,6], method = "log")[-1]
+QQQ = Return.calculate(QQQ[,6], method = "log")[-1]
+
+returns = data.frame(QQQ, TQQQ, SQQQ)
+cn = c("QQQ", "TQQQ", "SQQQ")
+names(returns) = cn
+
+retchart = chart.CumReturns(returns, wealth.index = TRUE, legend.loc = "topleft", main = "Cumulative Returns", colorset = c("green", "blue", "red"))
+
+
+comp1 = returns |>
+  select(QQQ, TQQQ) |>
+  mutate("3x QQQ" = 3*QQQ, Dif = `3x QQQ` - TQQQ, across(1:4, ~ percent(.x, 2))) |>
+  filter(Dif == min(Dif) | Dif == max(Dif)) |>
+  mutate(across(1:4, ~ as.character(.x))) |>
+  rownames_to_column("Date")
+
+comp2 = returns |>
+  select(QQQ, SQQQ) |>
+  mutate("-3x QQQ" = -3*QQQ, Dif = `-3x QQQ` - SQQQ, across(1:4, ~ percent(.x, 2))) |>
+  filter(Dif == min(Dif) | Dif == max(Dif))|>
+  mutate(across(1:4, ~ as.character(.x))) |>
+  rownames_to_column("Date")
+
+comp3 = returns |>
+  select(TQQQ, SQQQ) |>
+  mutate("Inverse TQQQ" = -1*TQQQ, Dif = `Inverse TQQQ` - SQQQ, across(1:4, ~ percent(.x, 2))) |>
+  filter(Dif == min(Dif) | Dif == max(Dif))|>
+  mutate(across(1:4, ~ as.character(.x))) |>
+  rownames_to_column("Date")
+
+
+cn = c("Date", "QQQ\nReturn", "TQQQ\nReturn", "Theoretical\n3x Return", "Max\nDifference")
+names(comp1) = cn
+cn = c("Date", "QQQ\nReturn", "SQQQ\nReturn", "Theoretical\n-3x Return", "Max\nDifference")
+names(comp2) = cn
+cn = c("Date", "TQQQ\nReturn", "SQQQ\nReturn", "Inverse\nTQQQ Return", "Max\nDifference")
+names(comp3) = cn
+
+fit1 = lm(TQQQ ~ QQQ, returns)
+fit2 = lm(SQQQ ~ QQQ, returns)
+fit3 = lm(TQQQ ~ SQQQ, returns)
+
+p1 = ggplot(returns, aes(x = QQQ, y = TQQQ)) +
+  geom_point() +
+  geom_smooth(method = "lm", formula = y ~ x, color  = "blue") +
+  labs(title = "QQQ vs TQQQ", x = "QQQ Returns", y = "LETF Returns") +
+  theme_minimal() +
+  annotate("text", x = -.05, y = .1, label = paste("Beta of", round(coef(fit1)[2], 2) )) +
+  annotate("text", x = -.05, y = .15, label = paste("R-Squared", round(summary(fit1)[[8]], 2) ))
+
+p2 = ggplot(returns, aes(x = QQQ, y = SQQQ)) +
+  geom_point() +
+  geom_smooth(method = "lm", formula = y ~ x, color = "red") +
+  labs(title = "QQQ vs SQQQ", x = "QQQ Returns", y = "LETF Returns") +
+  theme_minimal()+
+  annotate("text", x = -.05, y = -.1, label = paste("Beta of", round(coef(fit2)[2], 2) )) +
+  annotate("text", x = -.05, y = -.15, label = paste("R-Squared", round(summary(fit2)[[8]], 2) ))
+
+p3 = ggplot(returns, aes(x = TQQQ, y = SQQQ)) +
+  geom_point() +
+  geom_smooth(method = "lm", formula = y ~ x, color = "green") +
+  labs(title = "TQQQ vs SQQQ", x = "TQQQ Returns", y = "SQQQ Returns") +
+  theme_minimal()+
+  annotate("text", x = 0, y = .1, label = paste("Beta of", round(coef(fit3)[2], 2) )) +
+  annotate("text", x = 0, y = .15, label = paste("R-Squared", round(summary(fit3)[[8]], 2) ))
+
+
+
+
+
+
+```
+
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', fig.width=15, fig.height=8}
+
+
+
+t1 = tableGrob(comp1, rows = NULL)
+t2 = tableGrob(comp2, rows = NULL)
+t3 = tableGrob(comp3, rows = NULL)
+
+lay = rbind(
+  c(1,1,1,2,2,2,3,3,3),
+  c(1,1,1,2,2,2,3,3,3),
+  c(1,1,1,2,2,2,3,3,3),
+  c(4,4,4,5,5,5,6,6,6),
+  c(4,4,4,5,5,5,6,6,6)
+)
+
+grid.arrange(p1,p2,p3,t1,t2,t3, layout_matrix = lay)
+
+
+```
+
+We can see from the above plots that the LETFs do a commendable job at providing their investors the promised returns with regression coefficients almost exactly matching the funds description. One interesting characteristic to note with the graphs is the slight concavity in the returns of SQQQ and TQQQ to the index. The effect is much more noticeable in the graph that plots TQQQ and SQQQ returns. Admittedly, the only plausible explanation I have found is that the investment strategies that the LETFs use become less effective in the event of extreme movements in the underlying index. Funds like these are usually only rebalanced on a daily basis, so the extreme moves can cause a significant change in the characteristics of the funds portfolio. To elaborate on this, the largest one day differences for the theoretical return of the LETFs (3x or -3x the index) and the actual LETFs were 4.74% and 11.12% for TQQQ and SQQQ respectively. These are obviously significant departures from the investment objectives. What exactly happened on these days I could not tell you, but it is interesting to note that they both occurred during the week of March 16, 2020. 
+
+## Use Cases for LETFs
+
+As shown above, with the few noted exceptions, the LETFs in question do a fair job at emulating their $\beta$ times the index return. So, how can these instruments be used? The most straight forward is to use them to trade on an intraday time frame as set forth by the fund prospectus. These would be directional bets on whatever information you deem to be important. Obviously, leveraged directional bets can be made with other derivatives, but the attraction of LETFs is that they do not have any margin requirements. This is certainly a draw for anyone who does not want to deal with margin, but just like any other leveraged trade, both the gains and losses are magnified. Another interesting fact is that while the gains for a positive $\beta$ fund are infinite, and loss capped at the initial investment amount, this is not the case for negative $\beta$ funds. Take SQQQ for instance. If the underlying index gains indefinitely, the portfolio value will approach zero (this is slightly simplified). On the contrary, the index cannot go below zero, which implies that there are limited potential gains for SQQQ. So while the outcomes for TQQQ are limitless, outcomes for SQQQ are range bound. 
+
+What about long-term holding of LETFs? A naive answer would be that if you believe the market will have a positive return over a specified period, that holding the LETF will yield that return multiplied by its $\beta$. Sadly, that is not the case. As an example, say the index we are tracking posts returns of -10%, +20%, -5: 
+
+The graph above shows how even though the index can post a gain, it is possible that positive leverage fund will post a loss. In the literature, this has many names from path-dependency, volatility drag, attrition, and so on. Before diving into this topic further, let's take a look at the cumulative returns of SQQQ, TQQQ, and the NASDAQ Composite Index.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', fig.width=8, fig.height=6}
+retchart 
+```
+One can see over this five year period that while the index gained about 50%, TQQQ actually lost around 50%. SQQQ faired much worse. 
+
+For illustrative purposes, in this next section we are going to create a hypothetical stock index and two LETFs with $\beta$s of 3 and -3. For simplicity's sake, we are going to assume that these LETFs have zero tracking error. We are going to show how the value of a portfolio holding an 100% in an LETF over a longer period of time varies greatly from (-)3x the index portfolio ending value. Time to jump into some Monte Carlos.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+
+###For Line graphs seed 623 for even portfolio
+###decrease in index 1965? inc 1527
+
+a = function(steps, u, vol){
+  
+  etf = rnorm(steps, u, vol)
+  letf = 3*etf
+  setf = -3*etf
+  
+  etf = cumprod(1+etf)
+  letf = cumprod(1+letf)
+  setf = cumprod(1+setf)
+  
+  z = data.frame(etf,letf,setf) 
+  z = z |>
+    rownames_to_column("Days") |>
+    mutate(Days = as.numeric(Days))
+ 
+  cn = c("Days", "Index", "3x LETF", "-3x LETF")
+  names(z) = cn
+  
+  p1 = ggplot(z, aes(x = Days)) +
+    geom_line(aes(y = Index), color = "blue", linewidth = .75) +
+    geom_line(aes(y = `3x LETF`), color = "green", linewidth = .75) +
+    geom_line(aes(y = `-3x LETF`), color = "red",  linewidth = .75 ) +
+    labs(title = "Cumulative Returns", x = "Trading Days", y = "Return")
+  
+  p1 = ggplotly(p1)
+  
+  x = as.numeric(tail(z, n=1))
+
+  r = x
+
+ p1
+  #print(r)
+}
+##mu
+set.seed(623)
+plot1 = a(252, 0, .01)
+##even
+set.seed(640)
+plot2 = a(252, 0, .01)
+##md
+set.seed(108)
+plot3 = a(252, 0, .01)
+
+####ridges for ><= 0 ret####
+a = function(steps, u, vol){
+  
+  etf = rnorm(steps, u, vol)
+  letf = 3*etf
+  setf = -3*etf
+  
+  etf = cumprod(1+etf)
+  letf = cumprod(1+letf)
+  setf = cumprod(1+setf)
+  
+  z = data.frame(etf,letf,setf)
+ 
+  cn = c( "Index", "3x LETF", "-3x LETF")
+  names(z) = cn
+
+  x = as.numeric(tail(z, n=1))
+  
+  r = x-1
+
+  print(r)
+}
+
+results  = as.data.frame(t(replicate(5000,a(252,0,.01))))
+
+colnames(results) = c("Underlying", "3x", "-3x")
+
+mc1 = results |>
+ filter(Underlying > 0)
+mc0 = results |>
+  filter(Underlying > -.03 & Underlying < .03)
+mc00 = results |>
+  filter(Underlying < 0)
+
+td1 = pivot_longer(mc1, cols = 1:3)
+td0 = pivot_longer(mc0, cols = 1:3)
+td00 = pivot_longer(mc00, cols = 1:3)
+
+colnames(td1)= c("Asset", "Holding Period Return")
+colnames(td0)= c("Asset", "Holding Period Return")
+colnames(td00)= c("Asset", "Holding Period Return")
+
+td1 = td1 |>
+  mutate(Asset = as.factor(Asset))
+td0 = td0 |>
+  mutate(Asset = as.factor(Asset))
+td00 = td00 |>
+  mutate(Asset = as.factor(Asset))
+
+z1 = aggregate(`Holding Period Return` ~ `Asset`, data = td1, FUN = mean)
+z0 = aggregate(`Holding Period Return` ~ `Asset`, data = td0, FUN = mean)
+z00 = aggregate(`Holding Period Return` ~ `Asset`, data = td00, FUN = mean)
+
+g1 = ggplot(td1, aes(x = `Holding Period Return`, y = Asset , fill = Asset)) +
+  geom_density_ridges(show.legend = FALSE) + 
+  geom_vline(data = z1, aes(xintercept = `Holding Period Return`, color = Asset), show.legend = FALSE) +
+  geom_text(data = z1, aes(x = `Holding Period Return`, label = percent(`Holding Period Return`,0)), vjust = -0.5) +
+  xlim(-1,2) +
+  labs(title = "When Underlying has Positive HPR")
+
+g2 = ggplot(td0, aes(x = `Holding Period Return`, y = Asset , fill = Asset)) +
+  geom_density_ridges(show.legend = FALSE) + 
+  geom_vline(data = z0, aes(xintercept = `Holding Period Return`, color = Asset), show.legend = FALSE) +
+  geom_text(data = z0, aes(x = `Holding Period Return`, label = percent(`Holding Period Return`,0)), vjust = -0.5) +
+  labs(title = "When Underlying has +/- 3% HPR")
+  
+
+g3 = ggplot(td00, aes(x = `Holding Period Return`, y = Asset , fill = Asset)) +
+  geom_density_ridges(show.legend = FALSE) + 
+  geom_vline(data = z00, aes(xintercept = `Holding Period Return`, color = Asset), show.legend = FALSE) +
+  geom_text(data = z00, aes(x = `Holding Period Return`, label = percent(`Holding Period Return`,0)), vjust = -0.5) +
+  xlim(-1,2) +
+  labs(title = "When Underlying has Negative HPR")
+
+#####
+
+###Arranging plots by situation and throwing a ridge plot with it
+
+
+
+b = function(steps, u, vol){
+  
+  etf = rnorm(steps, u, vol)
+  letf = 3*etf
+  setf = -3*etf
+  
+  etf = cumprod(1+etf)
+  letf = cumprod(1+letf)
+  setf = cumprod(1+setf)
+  
+  z = data.frame(etf,letf,setf) |>
+    mutate(Days = steps)
+  
+  
+  cn = c("Time-Frame", "Index", "3x LETF", "-3x LETF")
+  names(z) = cn
+  
+  x = as.numeric(tail(z, n=1))
+  
+  x
+}
+
+ts = sequence(50, 10, 10)
+
+df = data.frame()
+
+for (i in 1:length(ts)){
+  for (j in 1:300){
+    df = rbind(df, b(ts[i], 0, .01))
+  }
+}
+
+colnames(df) = c("Index", "3x LETF", "-3x LETF", "Days")
+
+test = df |>
+  filter(Index > .97 & Index < 1.03)
+
+gd1 = pivot_longer(df, cols = 1:3)
+gd = pivot_longer(test, cols = 1:3)
+
+colnames(gd1) = c("Days", "Asset", "Portfolio Value")
+colnames(gd) = c("Days", "Asset", "Portfolio Value")
+
+
+p = ggplot(gd, aes(x = `Portfolio Value`, y = Asset , fill = Asset)) +
+  geom_density_ridges() +
+  transition_states(Days) +
+  labs(title = 'Time Horizon in Days: {closest_state}', x = 'Portfolio Value', y = "Asset" ) +
+  xlim(0.2, 1.5) 
+
+p1 = ggplot(gd1, aes(x = `Portfolio Value`, y = Asset , fill = Asset)) +
+  geom_density_ridges() +
+  transition_states(Days) +
+  labs(title = 'Time Horizon in Days: {closest_state}', x = 'Portfolio Value', y = "Asset" ) +
+  xlim(0, 2)
+  
+
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', fig.width=8, fig.height=5}
+plot1
+plot2
+plot3
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', fig.width=15, fig.height=6}
+grid.arrange(g1,g2,g3, nrow = 1)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', fig.width=15, fig.height=10}
+animate(p1, renderer = gifski_renderer())
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', fig.width=15, fig.height=10}
+animate(p, renderer = gifski_renderer())
+```
+
+## Options on Leveraged Exchange-Traded Funds
+
+We have seen from the above that the dynamics for LETFs differ greatly over time compared to the underlying index. Now we will dive into how these dynamics affect the options chains of these ETFs. 
+
+\n
+
+A first note is that while options on the underlying index (QQQ) are extremely liquid, options on either LETF are much less so. A problem that arises from this is stale pricing on some contracts. In our analysis, we filter out any observations where the last-traded date is not the same day as when the price of the contract is observed. Additionally, we filter out any observations where the implied volatility is null due to formula bounds being broken. That leaves us with a decent amount of data for the short-dated options, but disparate observations for the longer-dated options, especially on the LETFs. 
+
+\n
+
+## Implied Volatility
+```{r, message=FALSE, warning=FALSE, echo=FALSE, results='hide'}
+####Evaluating Options Attributes across intraday
+
+#Add dynamic risk free rate
+
+library(tidyverse)
+
+pull_date = "2024-01-29"
+
+time_str = "12:30:00 PM"
+
+datetime = paste(pull_date,time_str)
+
+datetime = as.numeric(as.POSIXct(datetime, format = "%Y-%m-%d %I:%M:%S %p"))
+
+underlying = data.frame(c("TQQQ","SQQQ","QQQ"), c("y", "y", "n"), c(3,-3,1))
+names(underlying) = c("U","L","B")
+
+index = underlying |>
+  filter(L == "n") |>
+  pull(U)
+
+####Generalized BSM Equations
+
+GBSM.Price = function(spot, strike, volatility, riskfree, yield, dte, type){
+  
+  t = dte/365.25
+  
+  d1 = (1 / (volatility * sqrt(t))) * (log(spot/strike) + (riskfree - yield + (.5 * volatility^2)) * t)
+  d2 = d1 - (volatility * sqrt(t))
+  
+  price = ifelse(type == "c",
+                 (spot * exp(-yield * t) * pnorm(d1)) - (strike * exp(-riskfree * t) * pnorm(d2)),
+                 (strike * exp(-riskfree * t) * pnorm(-d2)) - (spot * exp(-yield * t) * pnorm(-d1))
+  )
+  price
+}
+
+GBSM.Greeks = function(spot, strike, volatility, riskfree, yield, dte, type){
+  
+  t = dte/365.25
+  
+  d1 = (1 / (volatility * sqrt(t))) * (log(spot/strike) + (riskfree - yield + (.5 * volatility^2)) * t)
+  d2 = d1 - (volatility * sqrt(t))
+  
+  price = ifelse(type == "c",
+                 (spot * exp(-yield * t) * pnorm(d1)) - (strike * exp(-riskfree * t) * pnorm(d2)),
+                 (strike * exp(-riskfree * t) * pnorm(-d2)) - (spot * exp(-yield * t) * pnorm(-d1))
+  )
+  
+  delta = ifelse(type == "c",
+                 exp(-yield*t) * pnorm(d1),
+                 exp(-yield*t) * (pnorm(d1)-1)
+  )
+  
+  gama = (dnorm(d1) * exp(-yield*t)) / (spot * volatility * sqrt(t))
+  
+  theta = ifelse(type == "c",
+                 ((-spot * dnorm(d1) * volatility * exp(-yield * t)) / (2 *sqrt(t))) + (yield * spot * pnorm(d1) * exp(-yield*t)) - (riskfree * strike * exp(-riskfree * t) * pnorm(d2)),
+                 ((-spot * dnorm(d1) * volatility * exp(-yield * t)) / (2 *sqrt(t))) - (yield * spot * pnorm(-d1) * exp(-yield*t)) + (riskfree * strike * exp(-riskfree * t) * pnorm(-d2))
+  )
+  vega = spot * sqrt(t) * dnorm(d1) * exp(-yield * t)
+  
+  rho = ifelse(type == "c",
+               strike * t * exp(-riskfree * t) * pnorm(d2),
+               -strike * t * exp(-riskfree * t) * pnorm(-d2)
+  )
+  results = cbind(delta, gama, theta, vega, rho)
+  
+  results
+  
+  
+}
+
+#####IV Functions####
+
+error = function(price, spot, strike, volatility, riskfree, yield, dte, type){
+  x = price - GBSM.Price(spot, strike, volatility, riskfree, yield, dte, type)
+  x
+}
+
+Implied.Volatility = function(price, spot, strike, riskfree, yield, dte, type) {
+  x = tryCatch({
+    uniroot(
+      f = error,
+      interval = c(.01,3),
+      price = price,
+      spot = spot,
+      strike = strike,
+      riskfree = riskfree,
+      yield = yield,
+      dte = dte,
+      type = type)}, 
+    error = function(err) {
+      cat("Error: ", conditionMessage(err), "\n")
+      return(NA)
+    })
+  x[[1]]
+}
+
+IV = Vectorize(Implied.Volatility)
+
+
+####Data import
+#can use bizdays package for longer sequencing
+
+#day_list = list("2023-12-04", "2023-12-05", "2023-12-06", "2023-12-07", "2023-12-08", "2023-12-12", "2023-12-13", "2023-12-14", "2023-12-15")
+
+day_list = list("2024-01-29")
+
+setwd("C:\\Users\\Charlie/Desktop/R Stuff/Options Pull")
+
+pull_data = function(x){
+  path = paste0("Options_Pull_", x)
+  out = read.csv(path)
+  out
+}
+
+all_data = lapply(day_list, pull_data)
+
+not.na = function(x){
+  out = !is.na(x)
+  out
+}
+
+yahoo.clean.options = function(x){
+  
+  out = x |>
+    select(-Last.Price, -Change, -X..Change, -Volume, -Open.Interest, -Implied.Volatility) |>
+    mutate(across(Strike:HVol, as.numeric)) |>
+    na.omit() |>
+    distinct()
+  
+  out = out 
+}
+
+cleaned = lapply(all_data, yahoo.clean.options)
+
+qt = cleaned[[1]]$QuoteTime[which.min(abs(cleaned[[1]]$QuoteTime - datetime))]
+
+tidy.options = function(x){
+  out = x |>
+    mutate(Type = substr(Contract.Name, nchar(Contract.Name) - 8, nchar(Contract.Name) - 8), 
+           U = sub("\\d.*", "", Contract.Name),
+           Expiry = as_date(substr(Contract.Name, str_length(Contract.Name)-14, str_length(Contract.Name)-9)), 
+           Price = (Bid + Ask) / 2, 
+           S0 = case_when(U == "QQQ" ~ QQQ,
+                          U == "TQQQ" ~ TQQQ,
+                          U == "SQQQ" ~ SQQQ), 
+           ODay = as_date(as.POSIXct.numeric(QuoteTime)),
+           t = as.numeric(Expiry - ODay), 
+           Last.Trade.Date = as_date(substr(Last.Trade.Date,1,10)),
+           HVol = if_else(U == "QQQ", HVol/3, HVol),
+           Type = tolower(Type)) |>
+    filter(ODay == Last.Trade.Date,
+           Price > .001,
+           QuoteTime == qt) |>
+    mutate(ImpVol = IV(Price, S0, Strike, .045, 0, t, Type) ) |>
+    select(-TQQQ, -SQQQ, -QQQ, -Bid, -Ask, ) |>
+    na.omit()
+}
+
+td = lapply(cleaned, tidy.options)
+
+Greeks = function(x){
+  out = GBSM.Greeks(x$S0, x$Strike, x$ImpVol, .045, 0, x$t, x$Type)
+  out = cbind(x, out)
+  out
+  
+}
+
+o.g = lapply(td, Greeks)
+
+add.meta = function(x){
+  out = left_join(x, underlying, by = "U")
+  out
+}
+
+o.g = lapply(o.g, add.meta)
+
+M.f = function(x){
+  out = x |>
+    group_by(U, Type) |>
+    mutate(LM = if_else(Type == "c", log(S0/Strike), log(Strike/S0)),
+           MeanVol = mean(ImpVol),
+           Scaled.LM = if_else(L == "n", LM, 
+                               (LM/abs(B) + ((.045 * ( abs(B) - 1) + 0) * (t/365.25))/abs(B) + ((abs(B) -1)/2) * (t/365.25) * MeanVol^2)),
+           Scaled.ImpVol = if_else(L == "y", ImpVol/abs(B), ImpVol)) |>
+    ungroup()
+  out
+  
+}
+
+ud = lapply(o.g, M.f)
+
+
+
+###Filtering to expiries with all 3, just has to be same for each ODAY
+
+s.e1 = function(x){
+  out = x |>
+    filter(U != "QQQ") |>
+    select(Expiry) |>
+    distinct() |>
+    pull()
+  out
+}
+
+expiry = unlist(lapply(ud, s.e1)) |>
+  unique() |>
+  as_date()
+
+f.d = do.call(rbind, ud) |>
+  filter(Expiry %in% expiry)
+
+be = f.d |>
+  group_by(Expiry) |>
+  group_split()
+
+graph.fun1 = function(x){
+  
+  .day = x$ODay[1]
+  .expiry = x$Expiry[1]
+  
+  out = list()
+  
+  out$Calls = x |>
+    filter((U == "QQQ" & Type == "c") | (U == "TQQQ" & Type == "c") | (U == "SQQQ" & Type == "p")) |>
+    ggplot(aes(x = Scaled.LM, y = Scaled.ImpVol, color = U)) +
+    geom_point() +
+    labs(title = paste0(.expiry, " Expiry Calls On ", .day, " at Midday"))
+  
+  out$Puts = x |>
+    filter((U == "QQQ" & Type == "p") | (U == "TQQQ" & Type == "p") | (U == "SQQQ" & Type == "c")) |>
+    ggplot(aes(x = Scaled.LM, y = Scaled.ImpVol, color = U)) +
+    geom_point() +
+    labs(title = paste0(.expiry, " Expiry Puts On ", .day, " at Midday"))
+  
+  out
+}
+
+comps = lapply(be, graph.fun1)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+comps[[1]]$Calls
+comps[[1]]$Puts
+comps[[2]]$Calls
+comps[[2]]$Puts
+
+```
+
+## Implied Volatility Over Days {.tabset}
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, results='hide'}
+####Evaluating Options Attributes across intraday
+
+#Add dynamic risk free rate
+
+underlying = data.frame(c("TQQQ","SQQQ","QQQ"), c("y", "y", "n"), c(3,-3,1))
+names(underlying) = c("U","L","B")
+
+index = underlying |>
+  filter(L == "n") |>
+  pull(U)
+
+####Generalized BSM Equations
+
+GBSM.Price = function(spot, strike, volatility, riskfree, yield, dte, type){
+  
+  t = dte/365.25
+  
+  d1 = (1 / (volatility * sqrt(t))) * (log(spot/strike) + (riskfree - yield + (.5 * volatility^2)) * t)
+  d2 = d1 - (volatility * sqrt(t))
+  
+  price = ifelse(type == "c",
+                 (spot * exp(-yield * t) * pnorm(d1)) - (strike * exp(-riskfree * t) * pnorm(d2)),
+                 (strike * exp(-riskfree * t) * pnorm(-d2)) - (spot * exp(-yield * t) * pnorm(-d1))
+  )
+  price
+}
+
+GBSM.Greeks = function(spot, strike, volatility, riskfree, yield, dte, type){
+  
+  t = dte/365.25
+  
+  d1 = (1 / (volatility * sqrt(t))) * (log(spot/strike) + (riskfree - yield + (.5 * volatility^2)) * t)
+  d2 = d1 - (volatility * sqrt(t))
+  
+  price = ifelse(type == "c",
+                 (spot * exp(-yield * t) * pnorm(d1)) - (strike * exp(-riskfree * t) * pnorm(d2)),
+                 (strike * exp(-riskfree * t) * pnorm(-d2)) - (spot * exp(-yield * t) * pnorm(-d1))
+  )
+  
+  delta = ifelse(type == "c",
+                 exp(-yield*t) * pnorm(d1),
+                 exp(-yield*t) * (pnorm(d1)-1)
+  )
+  
+  gama = (dnorm(d1) * exp(-yield*t)) / (spot * volatility * sqrt(t))
+  
+  theta = ifelse(type == "c",
+                 ((-spot * dnorm(d1) * volatility * exp(-yield * t)) / (2 *sqrt(t))) + (yield * spot * pnorm(d1) * exp(-yield*t)) - (riskfree * strike * exp(-riskfree * t) * pnorm(d2)),
+                 ((-spot * dnorm(d1) * volatility * exp(-yield * t)) / (2 *sqrt(t))) - (yield * spot * pnorm(-d1) * exp(-yield*t)) + (riskfree * strike * exp(-riskfree * t) * pnorm(-d2))
+  )
+  vega = spot * sqrt(t) * dnorm(d1) * exp(-yield * t)
+  
+  rho = ifelse(type == "c",
+               strike * t * exp(-riskfree * t) * pnorm(d2),
+               -strike * t * exp(-riskfree * t) * pnorm(-d2)
+  )
+  results = cbind(delta, gama, theta, vega, rho)
+  
+  results
+  
+  
+}
+
+#####IV Functions####
+
+error = function(price, spot, strike, volatility, riskfree, yield, dte, type){
+  x = price - GBSM.Price(spot, strike, volatility, riskfree, yield, dte, type)
+  x
+}
+
+Implied.Volatility = function(price, spot, strike, riskfree, yield, dte, type) {
+  x = tryCatch({
+    uniroot(
+      f = error,
+      interval = c(.01,3),
+      price = price,
+      spot = spot,
+      strike = strike,
+      riskfree = riskfree,
+      yield = yield,
+      dte = dte,
+      type = type)}, 
+    error = function(err) {
+      cat("Error: ", conditionMessage(err), "\n")
+      return(NA)
+    })
+  x[[1]]
+}
+
+IV = Vectorize(Implied.Volatility)
+
+
+####Data import
+#can use bizdays package for longer sequencing
+
+day_list = list("2024-01-23","2024-01-24","2024-01-25")
+                
+                #"2023-11-07", "2023-11-08","2023-11-09")
+
+#,"2023-11-10", "2023-11-13", "2023-11-14","2023-11-15","2023-11-16","2023-11-17","2023-11-21", #"2023-11-22","2023-11-23", "2023-11-27", "2023-11-28","2023-11-29", "2023-11-30", "2023-12-01", "2023-12-04", #"2023-12-05", "2023-12-06", "2023-12-07", "2023-12-08", "2023-12-12", "2023-12-13", "2023-12-14", "2023-12-15"
+
+setwd("C:\\Users\\Charlie/Desktop/R Stuff/Options Pull")
+
+pull_data = function(x){
+  path = paste0("Options_Pull_", x)
+  out = read.csv(path)
+  out
+}
+
+all_data = lapply(day_list, pull_data)
+
+not.na = function(x){
+  out = !is.na(x)
+  out
+}
+
+yahoo.clean.options = function(x){
+  
+  out = x |>
+    select(-Last.Price, -Change, -X..Change, -Volume, -Open.Interest, -Implied.Volatility) |>
+    mutate(across(Strike:HVol, as.numeric)) |>
+    na.omit() |>
+    distinct()
+    
+  out = out 
+    }
+
+cleaned = lapply(all_data, yahoo.clean.options)
+
+tidy.options = function(x){
+  out = x |>
+    mutate(Type = substr(Contract.Name, nchar(Contract.Name) - 8, nchar(Contract.Name) - 8), 
+           U = sub("\\d.*", "", Contract.Name),
+           Expiry = as_date(substr(Contract.Name, str_length(Contract.Name)-14, str_length(Contract.Name)-9)), 
+           Price = (Bid + Ask) / 2, 
+           S0 = case_when(U == "QQQ" ~ QQQ,
+                          U == "TQQQ" ~ TQQQ,
+                          U == "SQQQ" ~ SQQQ), 
+           ODay = as_date(as.POSIXct.numeric(QuoteTime)),
+           t = as.numeric(Expiry - ODay), 
+           Last.Trade.Date = as_date(substr(Last.Trade.Date,1,10)),
+           HVol = if_else(U == "QQQ", HVol/3, HVol),
+           Type = tolower(Type)) |>
+    filter(Price > .001) |>
+    mutate(ImpVol = IV(Price, S0, Strike, .045, 0, t, Type) ) |>
+    select(-TQQQ, -SQQQ, -QQQ, -Bid, -Ask, ) |>
+    na.omit()
+}
+
+td = lapply(cleaned, tidy.options)
+
+Greeks = function(x){
+  out = GBSM.Greeks(x$S0, x$Strike, x$ImpVol, .045, 0, x$t, x$Type)
+  out = cbind(x, out)
+  out
+    
+}
+
+o.g = lapply(td, Greeks)
+
+add.meta = function(x){
+  out = left_join(x, underlying, by = "U")
+  out
+}
+
+o.g = lapply(o.g, add.meta)
+
+M.f = function(x){
+  out = x |>
+    group_by(U, Type) |>
+    mutate(LM = if_else(Type == "c", log(S0/Strike), log(Strike/S0)),
+           MeanVol = mean(ImpVol),
+           Scaled.LM = if_else(L == "n", LM, 
+                               (LM/abs(B) + ((.045 * ( abs(B) - 1) + 0) * (t/365.25))/abs(B) + ((abs(B) -1)/2) * (t/365.25) * MeanVol^2)),
+           Scaled.ImpVol = if_else(L == "y", ImpVol/abs(B), ImpVol)) |>
+    ungroup()
+  out
+  
+}
+
+ud = lapply(o.g, M.f)
+
+###Filtering to expiries with all 3, just has to be same for each ODAY
+
+s.e1 = function(x){
+  out = x |>
+    filter(U != "QQQ") |>
+    select(Expiry) |>
+    distinct() |>
+    pull()
+  out
+}
+
+expiry = unlist(lapply(ud, s.e1)) |>
+  unique() |>
+  as_date()
+
+f.d = do.call(rbind, ud) |>
+  filter(Expiry %in% expiry)
+
+contracts.0 = f.d |>
+  filter(QuoteTime == min(QuoteTime)) |>
+  group_by(U, Type, Expiry) |>
+  slice(which.min(abs(Scaled.LM))) |>
+  pull(Contract.Name)
+
+t.d = f.d |>
+  filter(Contract.Name %in% contracts.0) 
+
+qt = t.d |>
+  select(QuoteTime) |>
+  unique() |>
+  arrange() |>
+  rownames_to_column(var = "Index")
+  
+t.d = t.d |>
+  left_join(qt, by = "QuoteTime") |>
+  mutate(Index = as.numeric(Index))
+  
+be = t.d |>
+  group_by(Expiry) |>
+  group_split()
+
+graph.fun1 = function(x){
+  
+  ex = x |>
+    pull(Expiry)
+  ex = ex[1]
+  
+  from = x |>
+    pull(QuoteTime) |>
+    min() |>
+    as.POSIXct.numeric() |>
+    as_date()
+  to = x |>
+    pull(QuoteTime) |>
+    max() |>
+    as.POSIXct.numeric() |>
+    as_date()
+  
+  out = list()
+  
+  out$Calls = x |>
+    filter((U == "QQQ" & Type == "c") | (U == "TQQQ" & Type == "c") | (U == "SQQQ" & Type == "p")) |>
+    ggplot(aes(x = Index, y = Scaled.ImpVol, color = U)) +
+    geom_line() +
+    labs(title = paste0(ex, " Calls From ", from, " to ", to))
+  
+  out$Puts = x |>
+    filter((U == "QQQ" & Type == "p") | (U == "TQQQ" & Type == "p") | (U == "SQQQ" & Type == "c")) |>
+    ggplot(aes(x = Index, y = Scaled.ImpVol, color = U)) +
+    geom_line() +
+    labs(title = paste0(ex, " Puts From ", from, " to ", to))
+  
+  out
+}
+
+comps = lapply(be, graph.fun1)
+
+name.fun = function(x){
+  y = as.character(as_date(as.numeric(x$Expiry[1])))
+  y
+  
+}
+
+nm = unlist(lapply(be, name.fun)) 
+
+names(be) = nm
+names(comps) = nm
+
+```
+
+
+Here we have a selection of days (we will be looking at the midday time frame) as well as maturities to analyze. 
+
+
+```{r, results="asis", echo=FALSE}
+
+for(i in 1:length(nm)){
+  
+  cat("\n") 
+  cat("###", nm[i], "\n") # Create second level headings with the names.
+  
+  
+   print(comps[[i]]$Calls)
+  
+   print(comps[[i]]$Puts)
+  
+  cat("\n")
+  
+}
+
+```
+
+## {-}
+
