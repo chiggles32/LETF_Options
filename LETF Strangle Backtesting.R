@@ -18,7 +18,7 @@ setwd("C:/Users/Charlie/Desktop/R Stuff/Cleaned_Option_Data")
 #Calendars
 load_quantlib_calendars("UnitedStates/NYSE", from = "2023-10-29", to = Sys.Date())
 
-trade_days = bizseq("2023-10-29", Sys.Date() - 60 , cal = "QuantLib/UnitedStates/NYSE")
+trade_days = bizseq("2023-10-29", Sys.Date() - 70 , cal = "QuantLib/UnitedStates/NYSE")
 
 gathered = file.exists(paste0("Options_Pull_", trade_days))
 

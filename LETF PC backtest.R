@@ -132,6 +132,11 @@ all_data = lapply(trade_days, pull.data.function)
 
 all_data = do.call(rbind, all_data)
 
+all_data = all_data |>
+  mutate(RP = (Price - Intrinsic) / Strike,
+         Scaled.RP = if_else(abs(B) > 1, RP/abs(B), RP),
+         Intrinsic = if_else(Intrinsic < 0, 0, Intrinsic))
+
 Tex = all_data |>
   filter(U == "TQQQ") |>
   pull(Expiry) |>
@@ -206,6 +211,8 @@ SQQQ = SQQQ |>
 
 closes = rbind(QQQ, TQQQ, SQQQ)
 
+rm(SQQQ,TQQQ, QQQ)
+
 test = Shared_Data |>
   left_join(closes, by = c("Expiry", "U"))
 
@@ -237,8 +244,8 @@ test |>
 gtest = test |>
   filter((Bid != 0 & Ask != 0)) |>
   group_by(U, QuoteTime, Expiry, Strike) |>
-  arrange(Strike, .by_group = T) |>
-  mutate(gvar = cur_group_id()) |>
+  # arrange(Strike, .by_group = T) |>
+  # mutate(gvar = cur_group_id()) |>
   distinct() |>
   filter(n() == 2, Expiry < Sys.Date()) 
 
@@ -264,7 +271,9 @@ ctest = gtest |>
   mutate(End_Price = if_else(is.na(End_Price), abs(S0t - Strike), End_Price),
          ET = if_else(is.na(ET), as.numeric(as.POSIXct(paste0(Expiry, " 16:00:00"))), ET),
          deltat = time_length(difftime(QuoteTime, ET), unit = "day"),
-         logret = log(End_Price/Start_Price))
+         logret = log(End_Price/Start_Price),
+         RP = if_else(U == "QQQ", (Start_Price - abs(Strike-S01))/ Strike, ((Start_Price - abs(Strike-S01))/ Strike) * (1/3)))
+
 
 ###Clean this up then move on to create a way to compare across and profits.
 ## basic buy strangle comparison + correlation to market.
@@ -333,23 +342,42 @@ Q = map2_df(Y$ID, Y$value, ~ {
 
 
 rdf = Q |>
-  mutate(Simple_Ret = if_else(ImpVol > ImpVol.1, 
-                              (-logret + logret.1) / 2,
-                              (logret - logret.1) / 2),
-         IV_Dif = abs(ImpVol - ImpVol.1),
-         TTE = deltat,
+  mutate(IV_Dif = abs(ImpVol - ImpVol.1),
+         TTE = abs(deltat),
          M_Dif = abs(Moneyness - Moneyness.1),
-         Rn = row_number()
-  ) |>
-  select(Simple_Ret, IV_Dif, TTE, M_Dif, Rn, Moneyness)
+         Rn = row_number(),
+         RP_Dif = abs(RP - RP.1),
+         Simple_Ret = (End_Price - Start_Price)/Start_Price,
+         Simple_Ret.1 = (End_Price.1 - Start_Price.1)/Start_Price.1,
+         SRet_Dif = abs(Simple_Ret - Simple_Ret.1),
+         LongShort = if_else(
+           ImpVol > ImpVol.1,
+           paste(sub("\\d.*", "", C1), sub("\\d.*", "", C1.1), sep = ">"),
+           paste(sub("\\d.*", "", C1.1), sub("\\d.*", "", C1), sep = ">")
+         )) 
+  
+
 
 tr = rdf |>
-  filter(M_Dif < .001)
+  filter(M_Dif < .001, RP_Dif > 0, abs(Moneyness) > .02)
 
-model = lm(Simple_Ret ~ IV_Dif + M_Dif, data = tr)
+tr = tr |>
+  mutate(LS_Ret = if_else(ImpVol > ImpVol.1,
+                          (-Simple_Ret + Simple_Ret.1)/2,
+                          (Simple_Ret - Simple_Ret.1)/2))
+
+model = lm(LS_Ret ~ IV_Dif + M_Dif + RP_Dif + TTE + IV_Dif * RP_Dif * TTE , data = tr)
 summary(model)
 par(mfrow=c(2,2)) # Set up the plotting area to display 4 plots at once
 plot(model) 
 
+###Why oh why 
+
+tr |>
+  filter(LS_Ret > 0) |>
+  ggplot( aes(x = IV_Dif, y = LS_Ret, color = LongShort)) +
+  geom_point()
+
 new_data = data.frame(IV_Dif = seq(from = .01, to = .5, by = .05))
 predict(model, new_data)
+
