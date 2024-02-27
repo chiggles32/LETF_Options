@@ -5,6 +5,7 @@ library(tidyverse)
 library(quantmod)
 library(lubridate)
 
+
 #### Some general structure####
 #   custom functions will be used that have names with "." as a spacer
 #   data sets will have the spacer be "_"
@@ -14,11 +15,13 @@ library(lubridate)
 
 setwd("C:/Users/Charlie/Desktop/R Stuff/Cleaned_Option_Data")
 
+time_str = "12:30:00 PM"
+
 
 #Calendars
 load_quantlib_calendars("UnitedStates/NYSE", from = "2023-10-29", to = Sys.Date())
 
-trade_days = bizseq("2023-10-29", Sys.Date() - 70 , cal = "QuantLib/UnitedStates/NYSE")
+trade_days = bizseq("2023-10-29", Sys.Date() - 80 , cal = "QuantLib/UnitedStates/NYSE")
 
 gathered = file.exists(paste0("Options_Pull_", trade_days))
 
@@ -135,7 +138,9 @@ all_data = do.call(rbind, all_data)
 all_data = all_data |>
   mutate(RP = (Price - Intrinsic) / Strike,
          Scaled.RP = if_else(abs(B) > 1, RP/abs(B), RP),
-         Intrinsic = if_else(Intrinsic < 0, 0, Intrinsic))
+         Intrinsic = if_else(Intrinsic < 0, 0, Intrinsic),
+         Midday = as.numeric(as.POSIXct(paste(ODay,time_str), format = "%Y-%m-%d %I:%M:%S %p"))) |>
+  filter(Expiry < Sys.Date())
 
 Tex = all_data |>
   filter(U == "TQQQ") |>
@@ -164,7 +169,7 @@ expiry_prices = Shared_Data |>
   group_by(Contract.Name) |>
   slice(which.min(TD)) |>
   select(Contract.Name, N.Price, ET, S0) |>
-  rename("Expiry_Price" = N.Price, "Ending_Price" = S0) |>
+  rename("End_MidPrice" = N.Price, "St" = S0) |>
   ungroup()
 ####
 #Pricing when IV is positive but bid ask is 0
@@ -175,7 +180,7 @@ Shared_Data = Shared_Data |>
   left_join(expiry_prices, by = "Contract.Name")
 
 Missing_Close = Shared_Data |>
-  filter(is.na(Ending_Price), Expiry < Sys.Date()) |>
+  filter(is.na(St), Expiry < Sys.Date()) |>
   pull(Expiry) |>
   unique()
 
@@ -217,28 +222,36 @@ test = Shared_Data |>
   left_join(closes, by = c("Expiry", "U"))
 
 test = test |>
-  mutate(Ending_Price = if_else(is.na(Ending_Price), Lookup, Ending_Price)) |>
-  select(-Lookup)
+  mutate(St = if_else(is.na(St), Lookup, St)) 
 
-
+midday_times = test |>
+  ungroup() |>
+  group_by(Expiry, ODay) |>
+  select(QuoteTime, Midday) |>
+  mutate(Time_Dif = abs(QuoteTime - Midday)) |>
+  slice_min(Time_Dif, n = 1) |>
+  pull(QuoteTime) |>
+  unique()
+  
 
 
 
 ##########
 
 test1 = test |>
+  filter(QuoteTime %in% midday_times) |>
   mutate(Analog = if_else(B < 0, if_else(Type == "p", "c", "p"), Type))
 
-times1 = test1 |>
-  pull(QuoteTime) |>
-  unique() |>
-  sort()
+# times1 = test1 |>
+#   pull(QuoteTime) |>
+#   unique() |>
+#   sort()
 
-test |>
-  group_by(U, QuoteTime) |>
-  filter(Price == 0 & Intrinsic != 0) |>
-  summarise(Count = n()) |>
-  view()
+# test |>
+#   group_by(U, QuoteTime) |>
+#   filter(Price == 0 & Intrinsic != 0) |>
+#   summarise(Count = n()) |>
+#   view()
 
 test2 = test1 |>
   filter(!is.na(ImpVol))
@@ -254,10 +267,12 @@ gtest = test2 |>
 ##how to ensure price is accurate
 
 ctest = gtest |>
-  filter(!is.na(Ending_Price)) |>
-  select(Contract.Name, Strike, QuoteTime, HVol, U, Expiry, Price, S0, theta, MeanVol, Scaled.LM, Scaled.ImpVol, Scaled.RP, Expiry_Price, ET, Ending_Price, Analog) |>
+  filter(!is.na(St), Last.Trade.Date == ODay) |>
   mutate(ET = if_else(is.na(ET), as.numeric(as.POSIXct(paste0(Expiry, " 16:00:00"))), ET),
-         deltat = time_length(difftime(QuoteTime, ET), unit = "day"))
+         deltat = time_length(difftime(QuoteTime, ET), unit = "day"),
+         End.Intrinsic = if_else(Type == "c",
+                                 max(0, St - Strike),
+                                 max(0, Strike - St)))
 
   
   
@@ -348,8 +363,8 @@ final = do.call(rbind, Matched_Calls) |>
 
 
 final = final |>
-  mutate(Simple_Ret = (Expiry_Price - Price)/Price,
-         Simple_Ret.1 = (Expiry_Price.1 - Price.1)/Price.1,
+  mutate(Simple_Ret = (End.Intrinsic - Price)/Price,
+         Simple_Ret.1 = (End.Intrinsic.1 - Price.1)/Price.1,
          SRet_Dif = abs(Simple_Ret - Simple_Ret.1),
          LongShort = if_else(
            Scaled.ImpVol > Scaled.ImpVol.1,
@@ -364,16 +379,23 @@ final = final |>
 
 
 tr = final |>
-  filter(M_Dif < .001)
+  filter(M_Dif < .005, abs(Scaled.LM) < .01)
 
 tr = tr |>
   mutate(LS_Ret = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
                           (-Simple_Ret + Simple_Ret.1)/2,
                           (Simple_Ret - Simple_Ret.1)/2),
-         IV_Dif = abs(Scaled.ImpVol-Scaled.ImpVol.1)) |>
-  filter(IV_Dif > .02)
+         IV_Dif = abs(Scaled.ImpVol-Scaled.ImpVol.1)
+                                 )
 
-model = lm(LS_Ret ~ IV_Dif , data = tr)
+thold = tr$IV_Dif |>
+  sd(na.rm = TRUE)
+
+tr = tr |>
+  filter(IV_Dif > thold,
+         End.Intrinsic != 0 & End.Intrinsic.1 != 0)
+
+model = lm(LS_Ret ~ IV_Dif + RP_Dif + IV_Dif*RP_Dif*M_Dif*Scaled.LM*TTE , data = tr)
 summary(model)
 par(mfrow=c(2,2)) # Set up the plotting area to display 4 plots at once
 plot(model) 
@@ -381,10 +403,14 @@ plot(model)
 ###Why oh why 
 
 tr |>
-  filter(LS_Ret != 0,
-         LongShort == "SQQQ>TQQQ" | LongShort == "TQQQ>SQQQ") |>
   ggplot( aes(x = IV_Dif, y = LS_Ret, color = LongShort)) +
   geom_point()
+
+tr |>
+  filter(abs(LS_Ret) < .005) |>
+  select(Contract.Name, Contract.Name.1, Expiry, QuoteTime, ODay, TTE:IV_Dif, Strike, Strike.1, Price, Price.1, S0, St, S0.1, St.1, End.Intrinsic, End.Intrinsic.1 ) |>
+  view()
+
 
 t.stats = tr |>
   select(LS_Ret, IV_Dif)
