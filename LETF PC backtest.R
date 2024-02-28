@@ -1,7 +1,7 @@
 ####Dependencies#####
 library(bizdays)
 library(tidyverse)
-#library(PerformanceAnalytics)
+library(PerformanceAnalytics)
 library(quantmod)
 library(lubridate)
 
@@ -21,7 +21,7 @@ time_str = "12:30:00 PM"
 #Calendars
 load_quantlib_calendars("UnitedStates/NYSE", from = "2023-10-29", to = Sys.Date())
 
-trade_days = bizseq("2023-10-29", Sys.Date() - 80 , cal = "QuantLib/UnitedStates/NYSE")
+trade_days = bizseq("2023-10-29", Sys.Date() , cal = "QuantLib/UnitedStates/NYSE")
 
 gathered = file.exists(paste0("Options_Pull_", trade_days))
 
@@ -355,55 +355,72 @@ match.fun = function(J) {
 Matched_Calls = lapply(Calls, match.fun)
 Matched_Puts = lapply(Puts, match.fun)
 
-final = do.call(rbind, Matched_Calls) |>
-  mutate(TTE = abs(deltat),
-         M_Dif = abs(Scaled.LM - Scaled.LM.1),
-         Rn = row_number(),
-         RP_Dif = abs(Scaled.RP - Scaled.RP.1))
+all_calls = do.call(rbind, Matched_Calls) 
+all_puts = do.call(rbind, Matched_Puts)
 
-
-final = final |>
-  mutate(Simple_Ret = (End.Intrinsic - Price)/Price,
-         Simple_Ret.1 = (End.Intrinsic.1 - Price.1)/Price.1,
-         SRet_Dif = abs(Simple_Ret - Simple_Ret.1),
-         LongShort = if_else(
-           Scaled.ImpVol > Scaled.ImpVol.1,
-           paste(sub("\\d.*", "", Contract.Name), sub("\\d.*", "", Contract.Name.1), sep = ">"),
-           paste(sub("\\d.*", "", Contract.Name.1), sub("\\d.*", "", Contract.Name), sep = ">")
-         )
+all_data = rbind(all_calls, all_puts) |>
+  mutate(
+    TTE = abs(deltat),
+    M_Dif = abs(Scaled.LM - Scaled.LM.1),
+    Rn = row_number(),
+    RP_Dif = abs(Scaled.RP - Scaled.RP.1),
+    Simple_Ret = (End.Intrinsic - Price)/Price,
+    Simple_Ret.1 = (End.Intrinsic.1 - Price.1)/Price.1,
+    SRet_Dif = abs(Simple_Ret - Simple_Ret.1),
+    LongShort = as.factor(if_else(
+      Scaled.ImpVol < Scaled.ImpVol.1,
+      paste(sub("\\d.*", "", Contract.Name), sub("\\d.*", "", Contract.Name.1), sep = "."),
+      paste(sub("\\d.*", "", Contract.Name.1), sub("\\d.*", "", Contract.Name), sep = "."))),
+    Lambda = delta * (S0 / Price),
+    Lambda.1 = delta.1 * (S0.1 / Price.1),
+    Adjusted.Theta = (1/365) * theta * (1/S0),
+    Adjusted.Theta.1 = (1/365) * theta.1 * (1/S0.1),
+    Adjusted.Gamma = gama * (S0 / Price),
+    Adjusted.Gamma.1 = gama.1 * (S0.1 / Price.1),
+    LS_Ret = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
+                     (-Simple_Ret + Simple_Ret.1)/2,
+                     (Simple_Ret - Simple_Ret.1)/2),
+    IV_Dif = abs(Scaled.ImpVol-Scaled.ImpVol.1),
+    Lambda_Dif = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
+                     (-Lambda + Lambda.1),
+                     (-Lambda.1 + Lambda)),
+    Theta_Dif = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
+                         (-Adjusted.Theta + Adjusted.Theta.1),
+                         (-Adjusted.Theta.1 + Adjusted.Theta)),
+    Gamma_Dif = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
+                        (-Adjusted.Gamma + Adjusted.Gamma.1),
+                        (-Adjusted.Gamma.1 + Adjusted.Gamma))
   )
+
+final = all_data |>
+  select(TTE:Gamma_Dif, Scaled.LM, Analog)
+   
 
 # functionize? the above, then create the final dataframe for regression
 # fix ret calculation
 # why is it showing the opposite of what it should?
 
 
-tr = final |>
-  filter(M_Dif < .005, abs(Scaled.LM) < .01)
+cr = final |>
+  filter(M_Dif < .005, abs(Scaled.LM) < .025, Analog == "c")
 
-tr = tr |>
-  mutate(LS_Ret = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
-                          (-Simple_Ret + Simple_Ret.1)/2,
-                          (Simple_Ret - Simple_Ret.1)/2),
-         IV_Dif = abs(Scaled.ImpVol-Scaled.ImpVol.1)
-                                 )
 
-thold = tr$IV_Dif |>
+
+thold = cr$IV_Dif |>
   sd(na.rm = TRUE)
 
-tr = tr |>
-  filter(IV_Dif > thold,
-         End.Intrinsic != 0 & End.Intrinsic.1 != 0)
+cr = cr |>
+  filter(IV_Dif > 2.5 * thold)
 
-model = lm(LS_Ret ~ IV_Dif + RP_Dif + IV_Dif*RP_Dif*M_Dif*Scaled.LM*TTE , data = tr)
+model = lm(LS_Ret ~ IV_Dif*RP_Dif*Gamma_Dif*TTE + Theta_Dif + Gamma_Dif + Lambda_Dif + M_Dif + TTE , data = cr)
 summary(model)
 par(mfrow=c(2,2)) # Set up the plotting area to display 4 plots at once
 plot(model) 
 
 ###Why oh why 
 
-tr |>
-  ggplot( aes(x = IV_Dif, y = LS_Ret, color = LongShort)) +
+cr |>
+  ggplot( aes(x = Lambda_Dif, y = Gamma_Dif, color = LongShort)) +
   geom_point()
 
 tr |>
@@ -415,5 +432,5 @@ tr |>
 t.stats = tr |>
   select(LS_Ret, IV_Dif)
 
-new_data = data.frame(IV_Dif = seq(from = .01, to = .5, by = .05))
+new_data = data.frame(IV_Dif = .009, RP_Dif = 0.01, TTE = 50, Scaled.LM = .01)
 predict(model, new_data)
