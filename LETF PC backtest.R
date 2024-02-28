@@ -21,7 +21,7 @@ time_str = "12:30:00 PM"
 #Calendars
 load_quantlib_calendars("UnitedStates/NYSE", from = "2023-10-29", to = Sys.Date())
 
-trade_days = bizseq("2023-10-29", Sys.Date() , cal = "QuantLib/UnitedStates/NYSE")
+trade_days = bizseq("2023-10-29", Sys.Date() - 50, cal = "QuantLib/UnitedStates/NYSE")
 
 gathered = file.exists(paste0("Options_Pull_", trade_days))
 
@@ -393,8 +393,73 @@ all_data = rbind(all_calls, all_puts) |>
   )
 
 final = all_data |>
-  select(TTE:Gamma_Dif, Scaled.LM, Analog)
+  select(LS_Ret,TTE:Gamma_Dif, Scaled.LM, Analog, -SRet_Dif, Simple_Ret, Simple_Ret.1, Rn)
+
+lf = final |>
+  filter(Analog == "c") |>
+  select(-Simple_Ret, -Simple_Ret.1, -Rn, -Lambda:-Adjusted.Gamma.1, -Analog)
    
+# Random Forest 
+library(randomForest)
+library(caTools)
+
+# Make sure to get rid of all variables that have look ahead bias *wink
+
+cr = lf |>
+  filter(M_Dif < .005, abs(Scaled.LM) < .025)
+
+
+
+split = sample.split(cr, SplitRatio = .6)
+
+train = subset(cr, split == TRUE) 
+
+thold = train$IV_Dif |>
+  sd(na.rm = TRUE)
+
+train = train |>
+  filter(IV_Dif > 2*thold)
+
+
+test = subset(cr, split == FALSE) |>
+  filter(IV_Dif > 2*thold)
+
+set.seed(500)
+
+# RF = randomForest(x = train[,-1],
+#                   y = train$LS_Ret,
+#                   ntree = 400)
+# 
+# y_predict = predict(RF, newdata = test[,-1])
+# 
+# ggplot(data.frame(Predicted = y_predict, Actual = test$LS_Ret), 
+#        aes(x = Actual, y = Predicted)) +
+#   geom_point() +
+#   geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+#   labs(title = "Random Forest Predictions on LS Trade Return", 
+#        x = "Actual Values", y = "Predicted Values")
+
+
+
+# varImpPlot(RF)
+
+#### Interaction FOrest
+library(diversityForest)
+
+
+
+int.model = interactionfor(dependent.variable.name = "LS_Ret", data = train, importance = "both", num.trees = 300 )
+
+plot(int.model)
+
+pdt = predict(int.model, data = test[,-1])
+
+ggplot(data.frame(Predicted = pdt$predictions, Actual = test$LS_Ret),
+       aes(x = Actual, y = Predicted)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+  labs(title = "Random Forest Predictions on LS Trade Return",
+       x = "Actual Values", y = "Predicted Values")
 
 # functionize? the above, then create the final dataframe for regression
 # fix ret calculation
@@ -414,7 +479,7 @@ cr = cr |>
 
 model = lm(LS_Ret ~ IV_Dif*RP_Dif*Gamma_Dif*TTE + Theta_Dif + Gamma_Dif + Lambda_Dif + M_Dif + TTE , data = cr)
 summary(model)
-par(mfrow=c(2,2)) # Set up the plotting area to display 4 plots at once
+par(mfrow=c(1,1)) # Set up the plotting area to display 4 plots at once
 plot(model) 
 
 ###Why oh why 
