@@ -4,30 +4,32 @@ library(tidyverse)
 library(PerformanceAnalytics)
 library(quantmod)
 library(lubridate)
-
-
-#### Some general structure####
-#   custom functions will be used that have names with "." as a spacer
-#   data sets will have the spacer be "_"
-# Trying to keep the data structured as a list in order to use lapply for efficiency/ease
+library(diversityForest)
+library(ranger)
 
 ####Some Initial Meta Data####
 
 setwd("C:/Users/Charlie/Desktop/R Stuff/Cleaned_Option_Data")
 
-time_str = "12:30:00 PM"
+time_str = "12:30:00 PM" #Midday quotes
 
-start_date = "2023-10-29"
-end_date = Sys.Date() - 50
+# partitioning test/training data
+train_date1 = "2023-10-29"
+train_date2 = Sys.Date() - 50
 
-#Calendars
+test_date1 = train_date2 +1
+test_date2 = Sys.Date()
+
+#Calendar for trading days
 load_quantlib_calendars("UnitedStates/NYSE", from = "2023-10-29", to = Sys.Date())
 
-trade_days = bizseq(start_date, end_date, cal = "QuantLib/UnitedStates/NYSE")
+train_days = bizseq(train_date1, train_date2, cal = "QuantLib/UnitedStates/NYSE")
+gathered = file.exists(paste0("Options_Pull_", train_days))
+train_days = train_days[gathered]
 
-gathered = file.exists(paste0("Options_Pull_", trade_days))
-
-trade_days = trade_days[gathered]
+test_days = bizseq(test_date1, test_date2, cal = "QuantLib/UnitedStates/NYSE")
+gathered = file.exists(paste0("Options_Pull_", test_days))
+test_days = test_days[gathered]
 
 #Underlying Assets
 underlying = data.frame(c("TQQQ","SQQQ","QQQ"), c("y", "y", "n"), c(3,-3,1))
@@ -37,107 +39,39 @@ index = underlying |>
   filter(L == "n") |>
   pull(U)
 
-####Custom Functions####
-
-#Generalized BSM Equations
-
-GBSM.Price = function(spot, strike, volatility, riskfree, yield, dte, type){
-  
-  t = dte/365.25
-  
-  d1 = (1 / (volatility * sqrt(t))) * (log(spot/strike) + (riskfree - yield + (.5 * volatility^2)) * t)
-  d2 = d1 - (volatility * sqrt(t))
-  
-  price = ifelse(type == "c",
-                 (spot * exp(-yield * t) * pnorm(d1)) - (strike * exp(-riskfree * t) * pnorm(d2)),
-                 (strike * exp(-riskfree * t) * pnorm(-d2)) - (spot * exp(-yield * t) * pnorm(-d1))
-  )
-  price
-}
-
-GBSM.Greeks = function(spot, strike, volatility, riskfree, yield, dte, type){
-  
-  t = dte/365.25
-  
-  d1 = (1 / (volatility * sqrt(t))) * (log(spot/strike) + (riskfree - yield + (.5 * volatility^2)) * t)
-  d2 = d1 - (volatility * sqrt(t))
-  
-  price = ifelse(type == "c",
-                 (spot * exp(-yield * t) * pnorm(d1)) - (strike * exp(-riskfree * t) * pnorm(d2)),
-                 (strike * exp(-riskfree * t) * pnorm(-d2)) - (spot * exp(-yield * t) * pnorm(-d1))
-  )
-  
-  delta = ifelse(type == "c",
-                 exp(-yield*t) * pnorm(d1),
-                 exp(-yield*t) * (pnorm(d1)-1)
-  )
-  
-  gama = (dnorm(d1) * exp(-yield*t)) / (spot * volatility * sqrt(t))
-  
-  theta = ifelse(type == "c",
-                 ((-spot * dnorm(d1) * volatility * exp(-yield * t)) / (2 *sqrt(t))) + (yield * spot * pnorm(d1) * exp(-yield*t)) - (riskfree * strike * exp(-riskfree * t) * pnorm(d2)),
-                 ((-spot * dnorm(d1) * volatility * exp(-yield * t)) / (2 *sqrt(t))) - (yield * spot * pnorm(-d1) * exp(-yield*t)) + (riskfree * strike * exp(-riskfree * t) * pnorm(-d2))
-  )
-  vega = spot * sqrt(t) * dnorm(d1) * exp(-yield * t)
-  
-  rho = ifelse(type == "c",
-               strike * t * exp(-riskfree * t) * pnorm(d2),
-               -strike * t * exp(-riskfree * t) * pnorm(-d2)
-  )
-  results = cbind(delta, gama, theta, vega, rho)
-  
-  results
-  
-  
-}
-
-#IV Functions
-
-error = function(price, spot, strike, volatility, riskfree, yield, dte, type){
-  x = price - GBSM.Price(spot, strike, volatility, riskfree, yield, dte, type)
-  x
-}
-
-Implied.Volatility = function(price, spot, strike, riskfree, yield, dte, type) {
-  x = tryCatch({
-    uniroot(
-      f = error,
-      interval = c(.01,3),
-      price = price,
-      spot = spot,
-      strike = strike,
-      riskfree = riskfree,
-      yield = yield,
-      dte = dte,
-      type = type)}, 
-    error = function(err) {
-      cat("Error: ", conditionMessage(err), "\n")
-      return(NA)
-    })
-  x[[1]]
-}
-
-IV = Vectorize(Implied.Volatility)
-
 ####Initial Data Pull####
-
-
 pull.data.function = function(x){
   path = paste0("Options_Pull_", x)
   out = read.csv(path)
   out
 }
 
-all_data = lapply(trade_days, pull.data.function)
+training_data = lapply(train_days, pull.data.function)
+
+testing_data = lapply(test_days, pull.data.function)
 
 ####Manipulating Option Data####
 
+all_training_data = do.call(rbind, training_data)
+all_testing_data = do.call(rbind, testing_data)
 
-all_data = do.call(rbind, all_data)
+all_training_data = all_training_data |>
+  mutate(GVar = "Train") |>
+  filter(Expiry < train_date2,
+         abs(Scaled.LM) < .03)
+all_testing_data = all_testing_data |>
+  mutate(GVar = "Test") |>
+  filter(Expiry < test_date2,
+         abs(Scaled.LM) < .03)
+
+all_data = rbind(all_training_data, all_testing_data)
+
+rm(all_training_data)
+rm(all_testing_data)
+rm(testing_data)
+rm(training_data)
 
 all_data = all_data |>
-  filter(Expiry < Sys.Date(),
-         abs(Scaled.LM) < .03) |>
   mutate(RP = (Price - Intrinsic) / Strike,
          Scaled.RP = if_else(abs(B) > 1, RP/abs(B), RP),
          Intrinsic = if_else(Intrinsic < 0, 0, Intrinsic),
@@ -155,12 +89,12 @@ Sex = all_data |>
 
 common = intersect(Tex, Sex)
 
-Shared_Data = all_data |>
+Shared_Expiry_Data = all_data |>
   filter(Expiry %in% common)
 
 rm(all_data)
 
-expiry_prices = Shared_Data |>
+expiry_prices = Shared_Expiry_Data |>
   filter(ODay == Expiry) |>
   mutate(
     ET = as.numeric(as.POSIXct(paste0(Expiry, " 15:00:00"), tz = "America/New_York")),
@@ -177,17 +111,17 @@ expiry_prices = Shared_Data |>
 
 
 
-Shared_Data = Shared_Data |>
+Shared_Expiry_Data = Shared_Expiry_Data |>
   left_join(expiry_prices, by = "Contract.Name")
 
-Missing_Close = Shared_Data |>
+Missing_Close = Shared_Expiry_Data |>
   filter(is.na(St), Expiry < Sys.Date()) |>
   pull(Expiry) |>
   unique()
 
 for (i in 1:length(underlying$U)) {
   
-  getSymbols(underlying$U[i], from = start_date, to = end_date)
+  getSymbols(underlying$U[i], from = train_date1, to = test_date2)
   
 }
 
@@ -219,13 +153,15 @@ closes = rbind(QQQe, TQQQe, SQQQe)
 
 rm(SQQQe,TQQQe, QQQe)
 
-test = Shared_Data |>
+Complete_Data = Shared_Expiry_Data |>
   left_join(closes, by = c("Expiry", "U"))
 
-test = test |>
+rm(Shared_Expiry_Data)
+
+Complete_Data = Complete_Data |>
   mutate(St = if_else(is.na(St), Lookup, St)) 
 
-midday_times = test |>
+midday_times = Complete_Data |>
   ungroup() |>
   group_by(Expiry, ODay) |>
   select(QuoteTime, Midday) |>
@@ -233,56 +169,30 @@ midday_times = test |>
   slice_min(Time_Dif, n = 1) |>
   pull(QuoteTime) |>
   unique()
-  
-
-
 
 ##########
 
-test1 = test |>
+Raw_Data = Complete_Data |>
   filter(QuoteTime %in% midday_times) |>
   mutate(Analog = if_else(B < 0, if_else(Type == "p", "c", "p"), Type))
 
-# times1 = test1 |>
-#   pull(QuoteTime) |>
-#   unique() |>
-#   sort()
+rm(Complete_Data)
 
-# test |>
-#   group_by(U, QuoteTime) |>
-#   filter(Price == 0 & Intrinsic != 0) |>
-#   summarise(Count = n()) |>
-#   view()
-
-test2 = test1 |>
-  filter(!is.na(ImpVol))
-
-gtest = test2 |>
-  filter((Bid != 0 & Ask != 0)) |>
+Filtered_Data = Raw_Data |>
+  filter(!is.na(ImpVol),
+         (Bid != 0 & Ask != 0),
+         !is.na(St),
+         Last.Trade.Date == ODay) |>
   group_by(U, QuoteTime, Expiry, Strike) |>
-  # arrange(Strike, .by_group = T) |>
-  # mutate(gvar = cur_group_id()) |>
   distinct() |>
-  filter(Expiry < Sys.Date()) 
-
-##how to ensure price is accurate
-
-ctest = gtest |>
-  filter(!is.na(St), Last.Trade.Date == ODay) |>
   mutate(ET = if_else(is.na(ET), as.numeric(as.POSIXct(paste0(Expiry, " 16:00:00"))), ET),
          deltat = time_length(difftime(QuoteTime, ET), unit = "day"),
          End.Intrinsic = if_else(Type == "c",
                                  max(0, St - Strike),
                                  max(0, Strike - St)))
 
-  
-  
-
-###Clean this up then move on to create a way to compare across and profits.
-## basic buy strangle comparison + correlation to market.
-
 # creating list of exp/qt
-p.c = ctest |>
+p.c = Filtered_Data |>
   ungroup() |>
   group_by(Analog) |>
   group_split()
@@ -301,10 +211,7 @@ p.c.x = lapply(p.c, group.exp.qt)
 Calls = p.c.x[[1]]
 Puts = p.c.x[[2]]
 
-  
-
-
-
+# Make more interpretable
 match.fun = function(J) {
   X = J |>
     select(U, Scaled.LM, ID)
@@ -359,8 +266,6 @@ Matched_Puts = lapply(Puts, match.fun)
 all_calls = do.call(rbind, Matched_Calls) 
 all_puts = do.call(rbind, Matched_Puts)
 
-
-
 all_data = rbind(all_calls, all_puts) |>
   mutate(Time_Period = paste(ODay, Expiry, sep = ","))
 
@@ -392,7 +297,7 @@ all_data = all_data |>
   left_join(Period_Stats, by = "Time_Period")
 
 
-all_data = all_data |>
+final_all_data = all_data |>
   mutate(
     Ave_IV = (Scaled.ImpVol + Scaled.ImpVol.1) / 2,
     IV_RV_Dif = Ave_IV - Period_Vol,
@@ -424,83 +329,138 @@ all_data = all_data |>
                      (Simple_Ret - Simple_Ret.1)/2),
     IV_Dif = abs(Scaled.ImpVol-Scaled.ImpVol.1),
     Lambda_Dif = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
-                     (-Lambda + Lambda.1),
-                     (-Lambda.1 + Lambda)),
+                         (-Lambda + Lambda.1),
+                         (-Lambda.1 + Lambda)),
     Theta_Dif = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
-                         (-Adjusted.Theta + Adjusted.Theta.1),
-                         (-Adjusted.Theta.1 + Adjusted.Theta)),
+                        (-Adjusted.Theta + Adjusted.Theta.1),
+                        (-Adjusted.Theta.1 + Adjusted.Theta)),
     Gamma_Dif = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
                         (-Adjusted.Gamma + Adjusted.Gamma.1),
                         (-Adjusted.Gamma.1 + Adjusted.Gamma)),
     Vega_Dif = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
-                        (-Adjusted.Vega + Adjusted.Vega.1),
-                        (-Adjusted.Vega.1 + Adjusted.Vega)),
+                       (-Adjusted.Vega + Adjusted.Vega.1),
+                       (-Adjusted.Vega.1 + Adjusted.Vega)),
     LS_Contract = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
                           paste(Contract.Name.1, Contract.Name),
                           paste(Contract.Name, Contract.Name.1)),
     Moneyness = as.factor(if_else(End.Intrinsic > 0 & End.Intrinsic.1 > 0, "Both ITM", ">1 OTM")))
 
-iv = all_data$Scaled.ImpVol.1-all_data$Scaled.ImpVol
-
-
-
-contract_summary = all_data |>
-  ungroup() |>
-  filter(M_Dif < 0.005, abs(Scaled.LM) < 0.025, Analog == "c") |>
-  group_by(LS_Contract) |>
-  summarise(Count = n())
-
-# hi
-
-final = all_data |>
+final = final_all_data |>
   group_by(LS_Contract) |>
   slice_min(QuoteTime) |>
-  select(LS_Ret,IV_RV_Dif:Vega_Dif, Scaled.LM, Analog, -SRet_Dif, Simple_Ret, Simple_Ret.1, Rn, Period_Return, Moneyness) 
-
-  
-
-lf = final |>
-  filter(Analog == "c") |>
   ungroup() |>
-  select(-Simple_Ret, -Simple_Ret.1, -Rn, -Lambda:-Adjusted.Vega.1, -Analog, -LS_Contract)
+  select(LS_Ret, Scaled.LM, Period_Return:M_Dif, RP_Dif, LongShort, LS_Ret:Moneyness, -LS_Contract, GVar, Analog) |>
+  group_by(GVar, Analog) |>
+  group_split() 
   
-   
-# Random Forest 
+lnames = c()
+cleaned = list()
 
-library(caTools)
+for (i in 1:length(final)){
+  x = final[[i]] 
+  datatype = first(x$GVar)
+  Analog = ifelse(first(x$Analog) == "c", "Calls", "Puts")
+  lnames[i] =  paste(datatype, Analog, sep = "_" )
+  cleaned[[i]] = x |>
+    select(-GVar, -Analog)
+  
+}
+
+names(cleaned) = lnames
 
 # Make sure to get rid of all variables that have look ahead bias *wink
+M_Dif_Threshold = .005
+Scaled.LM_Threshold = .025
 
-cr = lf |>
-  filter(M_Dif < .005, abs(Scaled.LM) < .025)
+Train_Calls = cleaned$Train_Calls |>
+  filter(M_Dif < M_Dif_Threshold, abs(Scaled.LM) < Scaled.LM_Threshold) |>
+  select(-Period_Return:-IV_RV_Dif, -Moneyness)
+
+Train_Puts = cleaned$Train_Puts |>
+  filter(M_Dif < M_Dif_Threshold, abs(Scaled.LM) < Scaled.LM_Threshold) |>
+  select(-Period_Return:-IV_RV_Dif, -Moneyness)
+
+Test_Calls = cleaned$Test_Calls |>
+  filter(M_Dif < M_Dif_Threshold, abs(Scaled.LM) < Scaled.LM_Threshold) |>
+    select(-Period_Return:-IV_RV_Dif, -Moneyness)
+
+Test_Puts = cleaned$Test_Puts |>
+  filter(M_Dif < M_Dif_Threshold, abs(Scaled.LM) < Scaled.LM_Threshold) |>
+  select(-Period_Return:-IV_RV_Dif, -Moneyness)
 
 
-
-# split = sample.split(cr$LS_Ret, SplitRatio = .5)
-# 
-# train = cr[!split,]
-
-thold = cr$IV_Dif |>
+Call_IV_SD = Train_Calls$IV_Dif |>
+  sd(na.rm = TRUE)
+Put_IV_SD = Train_Puts$IV_Dif |>
   sd(na.rm = TRUE)
 
-cr = cr |>
-  filter(IV_Dif > 1.5*thold) |>
-  ungroup()
-
-cr = as.data.frame(cr)
-
-# 
-# test = cr[split, ] |>
-#   filter(IV_Dif > 2*thold)
+Train_Calls = Train_Calls |>
+  filter(IV_Dif > 2 * Call_IV_SD) |>
+  as.data.frame()
+Test_Calls = Test_Calls |>
+  filter(IV_Dif > 2 * Call_IV_SD)|>
+  as.data.frame()
+Train_Puts = Train_Puts |>
+  filter(IV_Dif > 2 * Put_IV_SD)|>
+  as.data.frame()
+Test_Puts = Test_Puts |>
+  filter(IV_Dif > 2 * Put_IV_SD)|>
+  as.data.frame()
 
 set.seed(100)
 
 #### Interaction FOrest
-library(diversityForest)
+
+Call.Model = interactionfor(dependent.variable.name = "LS_Ret", data = Train_Calls, importance = "both", num.trees = 3000 )
+Call.Predictions = predict(Call.Model, data = Test_Calls[,-1])
+
+plot(Call.Model)
+
+ggplot(data.frame(Predicted = Call.Predictions$predictions, Actual = Test_Calls$LS_Ret),
+       aes(x = Actual, y = Predicted)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+  labs(title = "Random Forest Predictions on LS Trade Return",
+       x = "Actual Values", y = "Predicted Values")
+
+Call_Stats = data.frame(P = Call.Predictions$predictions, A = Test_Calls$LS_Ret) |>
+  mutate(Quadrant = case_when(P > 0 & A >= 0 ~ 1,
+                              P > 0 & A < 0 ~ 2,
+                              P < 0 & A <= 0 ~ 3,
+                              P < 0 & A > 0 ~ 4)) |>
+  group_by(Quadrant) |>
+  summarise(Count = n(),
+            Average.P = mean(P),
+            Average.A = mean(A),
+            StD.P = sd(P),
+            StD.A = sd(A))
 
 
+Put.Model = interactionfor(dependent.variable.name = "LS_Ret", data = Train_Puts, importance = "both", num.trees = 3000 )
+Put.Predictions = predict(Put.Model, data = Test_Puts[,-1])
 
-int.model = interactionfor(dependent.variable.name = "LS_Ret", data = cr, importance = "both", num.trees = 2500 )
+plot(Put.Model)
+
+ggplot(data.frame(Predicted = Put.Predictions$predictions, Actual = Test_Puts$LS_Ret),
+       aes(x = Actual, y = Predicted)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+  labs(title = "Random Forest Predictions on LS Trade Return",
+       x = "Actual Values", y = "Predicted Values")
+
+Put_Stats = data.frame(P = Put.Predictions$predictions, A = Test_Puts$LS_Ret) |>
+  mutate(Quadrant = case_when(P > 0 & A >= 0 ~ 1,
+                              P > 0 & A < 0 ~ 2,
+                              P < 0 & A <= 0 ~ 3,
+                              P < 0 & A > 0 ~ 4)) |>
+  group_by(Quadrant) |>
+  summarise(Count = n(),
+            Average.P = mean(P),
+            Average.A = mean(A),
+            StD.P = sd(P),
+            StD.A = sd(A))
+
+
 
 model = lm(LS_Ret ~ Period_Return , data = cr)
 summary(model)
@@ -543,8 +503,8 @@ x = data.frame(P = pdt$predictions, A = cr$LS_Ret) |>
 ############################################################################################################################################
 ######################################################################
 ######################################################################
-    
- ### Test on unseen expiry####
+
+### Test on unseen expiry####
 
 trade_days = bizseq(Sys.Date() - 49, Sys.Date() , cal = "QuantLib/UnitedStates/NYSE")
 
@@ -891,7 +851,7 @@ x = data.frame(P = pdt1$predictions, A = cr$LS_Ret) |>
 #####
 
 
-  
+
 
 
 # functionize? the above, then create the final dataframe for regression

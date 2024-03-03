@@ -1,0 +1,59 @@
+---
+title: "On a Long/Short Methodology for Trading Options on LETFs on their Underlying"
+author: "Charlie Lucas"
+date: "2024-02-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Background
+
+With options on Leveraged Exchange Traded Funds (LETFs), an important factor to consider is the relationship to the ...
+
+## Data
+
+The data for this research has been sourced via web scraping Yahoo!Finance.I have found the quotes they provide are accurate enough for this type of rough analysis. In future I hope to get higher quality historical data. 
+
+The period in question for the training data for the model is from "rvar" to "rvar". The testing data is from "rvar" to "rvar".
+
+## Model
+
+I chose to use a random forest ensemble as it is more flexible then generalized linear models. I use the package diversityForest for creating a random forest with interaction effects. I also use a non-interaction based random forest to find the importance of each variable. 
+
+## Variable Creation
+
+The data I have for this period is at 15 minute intervals daily. I condense this by taking the quotes that are closest to 12:30 PM for that trading day. I found that by this time most contracts have traded at least once and therefore a somewhat accurate implied volatility can be derived. Any contracts that have not traded on that day by 12:30 PM are dropped from the data. 
+
+From the quoted contract, a plethora of variables are created. Keep in mind that all of these variables will be scaled properly to their leverage factor and underlying price in order to be able to compare across assets. For example, in order to compare $\Delta$ I multiply by (S/V) where S is the price of the underlying and V is the price of the option. Essentially this provides the percent change of the option for a percent change in the underlying. 
+
+With this methodology we compute scaled versions of: delta, theta, gamma, vega, implied volatility, moneyness, and a relative pricing measure (RP) that is the time value of the option divided by the underlying price.
+
+Additionally, a variable called "Analog" was created to account for how a call on a inverse leverage ETF is equivalent to a put on a positive leverage ETF*. Essentially, it just ensures a put on SQQQ is compared against a call from TQQQ or QQQ.
+
+## Data Preparation
+
+The main focus of preparing the data was to match each contract to the most similar contract across the other LETF/ETF. So the matching criteria was the same expiration date, same analog, same time of quote, and then the closest available moneyness. This unfortunately leaves some contracts with not particularly good matches, but this is dealt with by arbitrarily filtering the data prior to training the model. More on that later. 
+
+For each pairing of contracts, whichever has the lower(higher) implied volatility is labeled "long"("short"). The difference in IV is then calculated in addition to the difference in the variables mentioned above. Note that none of these variables introduce look ahead bias as they are calculated using the information at the time of the quote, not expiration.
+
+Next, for each contract, the return is calculated by using the price of the option at observation and the intrinsic value at expiration. Then for the pair of contracts, the return of the long/short trade is calculated as such: (return of long contract - 1 * return of short contract) / 2. By this methodology, the portfolio constructed has zero cost as you would be long and short the same dollar amount. In this theoretical framework that is fine, but it is important to note that when actually trading the contracts, getting the same dollar exposure can be more difficult when considering trade size limits and other factors. 
+
+## The Final Data
+
+There are a few other considerations with the data prior to training the model. The first is that during the training period, the data cannot have more than one trade with the same long/short contracts.In this case, if there would be two or more of the same contracts traded, the trade that has the longest time to expiration is used. This was done in an effort to eliminate some redundancy in the data. Then for the remaining data, it is filtered on three criteria: the absolute value of the scaled log moneyness of the long contract must be less than 0.025 (proxy for near the money), the difference in moneyness between the contracts must be less than 0.005, and finally, the standard deviation of the difference in implied volatilities for the remaining observations is calculated and then all observations with less than two times the standard deviation are discarded. 
+
+This last filtering criteria obviously introduces some bias to the training data, but this is acceptable as we use the same value for the standard deviation when filtering the testing data which introduces no new information to the data as the standard deviation is based off of historical data not in the testing period.
+
+## Non-model Descriptive Statistics {.tabset}
+### Call Analogs
+
+### Put Analogs
+
+
+
+
+
+
