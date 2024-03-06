@@ -5,7 +5,7 @@ library(PerformanceAnalytics)
 library(quantmod)
 library(lubridate)
 library(diversityForest)
-library(ranger)
+# library(ranger)
 
 ####Some Initial Meta Data####
 
@@ -347,7 +347,7 @@ final_all_data = all_data |>
 
 final = final_all_data |>
   group_by(LS_Contract) |>
-  # slice_min(QuoteTime) |>
+  slice_min(QuoteTime) |>
   ungroup() |>
   select(LS_Ret, Scaled.LM, Period_Return:M_Dif, RP_Dif, LongShort, LS_Ret:Moneyness, -LS_Contract, GVar, Analog) |>
   group_by(GVar, Analog) |>
@@ -415,19 +415,45 @@ set.seed(123)
 Call.LS_Ret = hist(Train_Calls$LS_Ret, breaks = 20)
 Call.Lambda_Dif = hist(Train_Calls$Lambda_Dif, breaks = 20)
 Call.Vega_Dif = hist(Train_Calls$Vega_Dif, breaks = 20)
+Call.Scaled.LM = hist(Train_Calls$Scaled.LM, breaks = 20)
+Call.TTE = hist(Train_Calls$TTE, breaks = 20)
+Call.M_Dif = hist(Train_Calls$M_Dif, breaks = 20)
+Call.RP_Dif = hist(Train_Calls$RP_Dif, breaks = 20)
+Call.Theta_Dif = hist(Train_Calls$Theta_Dif, breaks = 20)
+Call.Gamma_Dif = hist(Train_Calls$Gamma_Dif, breaks = 20)
+Call.IV_Dif = hist(Train_Calls$IV_Dif, breaks = 20)
+
+Call.LongShort = Train_Calls |>
+  group_by(LongShort) |>
+  summarise("Number of Trades" = n())
+
 
 Put.LS_Ret = hist(Train_Puts$LS_Ret, breaks = 20)
 Put.Lambda_Dif = hist(Train_Puts$Lambda_Dif, breaks = 20)
 Put.Vega_Dif = hist(Train_Puts$Vega_Dif, breaks = 20)
+Put.Scaled.LM = hist(Train_Puts$Scaled.LM, breaks = 20)
+Put.TTE = hist(Train_Puts$TTE, breaks = 20)
+Put.M_Dif = hist(Train_Puts$M_Dif, breaks = 20)
+Put.RP_Dif = hist(Train_Puts$RP_Dif, breaks = 20)
+Put.Theta_Dif = hist(Train_Puts$Theta_Dif, breaks = 20)
+Put.Gamma_Dif = hist(Train_Puts$Gamma_Dif, breaks = 20)
+Put.LongShort = plot(Train_Puts$LongShort)
+Put.IV_Dif = hist(Train_Puts$IV_Dif, breaks = 20)
+
+Put.LongShort = Train_Puts |>
+  group_by(LongShort) |>
+  summarise("Number of Trades" = n())
 
 #### Interaction FOrest
 
 Call.Model = interactionfor(dependent.variable.name = "LS_Ret", data = Train_Calls, importance = "both", num.trees = 2000 )
 Call.Predictions = predict(Call.Model, data = Test_Calls[,-1])
 
-plot(Call.Model)
+Call.Effects1 = plotEffects(Call.Model, type = "quant", numpairs = 2)
+Call.Effects2 = plotEffects(Call.Model, type = "qual", numpairs = 2)
 
-Call.Predictions = ggplot(data.frame(Predicted = Call.Predictions$predictions, Actual = Test_Calls$LS_Ret),
+
+Call.PPlot = ggplot(data.frame(Predicted = Call.Predictions$predictions, Actual = Test_Calls$LS_Ret),
        aes(x = Actual, y = Predicted)) +
   geom_point() +
   geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
@@ -446,13 +472,13 @@ Call_Stats = data.frame(P = Call.Predictions$predictions, A = Test_Calls$LS_Ret)
             StD.P = sd(P),
             StD.A = sd(A))
 
-
 Put.Model = interactionfor(dependent.variable.name = "LS_Ret", data = Train_Puts, importance = "both", num.trees = 3000 )
 Put.Predictions = predict(Put.Model, data = Test_Puts[,-1])
 
-put.plots = plot(Put.Model)
+Put.Effects1 = plotEffects(Put.Model, type = "quant", numpairs = 2)
+Put.Effects2 = plotEffects(Put.Model, type = "qual", numpairs = 2)
 
-ggplot(data.frame(Predicted = Put.Predictions$predictions, Actual = Test_Puts$LS_Ret),
+Put.PPlot = ggplot(data.frame(Predicted = Put.Predictions$predictions, Actual = Test_Puts$LS_Ret),
        aes(x = Actual, y = Predicted)) +
   geom_point() +
   geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
@@ -471,6 +497,31 @@ Put_Stats = data.frame(P = Put.Predictions$predictions, A = Test_Puts$LS_Ret) |>
             StD.P = sd(P),
             StD.A = sd(A))
 
+#### Post Mortem Results
+
+Train_Calls1 = cleaned$Train_Calls |>
+  filter(M_Dif < M_Dif_Threshold, abs(Scaled.LM) < Scaled.LM_Threshold) |>
+  select(-IV_RV_Dif, -Moneyness)
+
+Train_Puts1 = cleaned$Train_Puts |>
+  filter(M_Dif < M_Dif_Threshold, abs(Scaled.LM) < Scaled.LM_Threshold) |>
+  select(-IV_RV_Dif, -Moneyness)
+
+Train_Calls1 = Train_Calls1 |>
+  filter(IV_Dif > 2 * Call_IV_SD) |>
+  as.data.frame()
+Train_Puts1 = Train_Puts1 |>
+  filter(IV_Dif > 2 * Put_IV_SD)|>
+  as.data.frame()
+
+post.calls = interactionfor(dependent.variable.name = "LS_Ret", data = Train_Calls1, importance = "both", num.trees = 2000 )
+
+p.c.e = plotEffects(post.calls, type = "quant", numpairs = 2)
+
+post.puts = interactionfor(dependent.variable.name = "LS_Ret", data = Train_Puts1, importance = "both", num.trees = 2000 )
+
+
+p.p.e = plotEffects(post.puts, type = "quant", numpairs = 2)
 
 
 model = lm(LS_Ret ~ Period_Return , data = cr)

@@ -9,6 +9,535 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+```{r, message=FALSE, warning=FALSE, echo=FALSE, results='hide'}
+####Dependencies#####
+library(bizdays)
+library(tidyverse)
+library(PerformanceAnalytics)
+library(quantmod)
+library(lubridate)
+library(diversityForest)
+# library(ranger)
+
+####Some Initial Meta Data####
+
+setwd("C:/Users/Charlie/Desktop/R Stuff/Cleaned_Option_Data")
+
+time_str = "12:30:00 PM" #Midday quotes
+
+# partitioning test/training data
+train_date1 = "2023-10-29"
+train_date2 = Sys.Date() - 25
+
+test_date1 = train_date2 +1
+test_date2 = Sys.Date()
+
+#Calendar for trading days
+load_quantlib_calendars("UnitedStates/NYSE", from = "2023-10-29", to = Sys.Date())
+
+train_days = bizseq(train_date1, train_date2, cal = "QuantLib/UnitedStates/NYSE")
+gathered = file.exists(paste0("Options_Pull_", train_days))
+train_days = train_days[gathered]
+
+test_days = bizseq(test_date1, test_date2, cal = "QuantLib/UnitedStates/NYSE")
+gathered = file.exists(paste0("Options_Pull_", test_days))
+test_days = test_days[gathered]
+
+#Underlying Assets
+underlying = data.frame(c("TQQQ","SQQQ","QQQ"), c("y", "y", "n"), c(3,-3,1))
+names(underlying) = c("U","L","B")
+
+index = underlying |>
+  filter(L == "n") |>
+  pull(U)
+
+####Initial Data Pull####
+pull.data.function = function(x){
+  path = paste0("Options_Pull_", x)
+  out = read.csv(path)
+  out
+}
+
+training_data = lapply(train_days, pull.data.function)
+
+testing_data = lapply(test_days, pull.data.function)
+
+####Manipulating Option Data####
+
+all_training_data = do.call(rbind, training_data)
+all_testing_data = do.call(rbind, testing_data)
+
+all_training_data = all_training_data |>
+  mutate(GVar = "Train") |>
+  filter(Expiry < train_date2,
+         abs(Scaled.LM) < .03)
+### loading in as a character (S.LM)
+
+all_testing_data = all_testing_data |>
+  mutate(GVar = "Test") |>
+  filter(Expiry < test_date2,
+         abs(Scaled.LM) < .03)
+
+all_data = rbind(all_training_data, all_testing_data)
+
+rm(all_training_data)
+rm(all_testing_data)
+rm(testing_data)
+rm(training_data)
+
+all_data = all_data |>
+  mutate(RP = (Price) / Strike,
+         Scaled.RP = if_else(abs(B) > 1, RP/abs(B), RP),
+         Intrinsic = if_else(Intrinsic < 0, 0, Intrinsic),
+         Midday = as.numeric(as.POSIXct(paste(ODay,time_str), format = "%Y-%m-%d %I:%M:%S %p")))
+
+Tex = all_data |>
+  filter(U == "TQQQ") |>
+  pull(Expiry) |>
+  unique()
+
+Sex = all_data |>
+  filter(U == "SQQQ") |>
+  pull(Expiry) |>
+  unique()
+
+common = intersect(Tex, Sex)
+
+Shared_Expiry_Data = all_data |>
+  filter(Expiry %in% common)
+
+rm(all_data)
+
+expiry_prices = Shared_Expiry_Data |>
+  filter(ODay == Expiry) |>
+  mutate(
+    ET = as.numeric(as.POSIXct(paste0(Expiry, " 15:00:00"), tz = "America/New_York")),
+    TD = abs(ET - QuoteTime),
+    TC = as.POSIXct(QuoteTime)
+  ) |>
+  group_by(Contract.Name) |>
+  slice(which.min(TD)) |>
+  select(Contract.Name, N.Price, ET, S0) |>
+  rename("End_MidPrice" = N.Price, "St" = S0) |>
+  ungroup()
+####
+#Pricing when IV is positive but bid ask is 0
+
+
+
+Shared_Expiry_Data = Shared_Expiry_Data |>
+  left_join(expiry_prices, by = "Contract.Name")
+
+Missing_Close = Shared_Expiry_Data |>
+  filter(is.na(St), Expiry < Sys.Date()) |>
+  pull(Expiry) |>
+  unique()
+
+for (i in 1:length(underlying$U)) {
+  
+  getSymbols(underlying$U[i], from = train_date1, to = test_date2)
+  
+}
+
+QQQe = QQQ |>
+  Cl() |>
+  as.data.frame() |>
+  rownames_to_column(var = "Expiry") |>
+  filter(Expiry %in% Missing_Close) |>
+  mutate(U = "QQQ") |>
+  rename("Lookup" = QQQ.Close)
+
+TQQQe = TQQQ |>
+  Cl() |>
+  as.data.frame() |>
+  rownames_to_column(var = "Expiry") |>
+  filter(Expiry %in% Missing_Close) |>
+  mutate(U = "TQQQ") |>
+  rename("Lookup" = TQQQ.Close)
+
+SQQQe = SQQQ |>
+  Cl() |>
+  as.data.frame() |>
+  rownames_to_column(var = "Expiry") |>
+  filter(Expiry %in% Missing_Close) |>
+  mutate(U = "SQQQ") |>
+  rename("Lookup" = SQQQ.Close)
+
+closes = rbind(QQQe, TQQQe, SQQQe)
+
+rm(SQQQe,TQQQe, QQQe)
+
+Complete_Data = Shared_Expiry_Data |>
+  left_join(closes, by = c("Expiry", "U"))
+
+rm(Shared_Expiry_Data)
+
+Complete_Data = Complete_Data |>
+  mutate(St = if_else(is.na(St), Lookup, St)) 
+
+midday_times = Complete_Data |>
+  ungroup() |>
+  group_by(Expiry, ODay) |>
+  select(QuoteTime, Midday) |>
+  mutate(Time_Dif = abs(QuoteTime - Midday)) |>
+  slice_min(Time_Dif, n = 1) |>
+  pull(QuoteTime) |>
+  unique()
+
+##########
+
+Raw_Data = Complete_Data |>
+  filter(QuoteTime %in% midday_times) |>
+  mutate(Analog = if_else(B < 0, if_else(Type == "p", "c", "p"), Type))
+
+rm(Complete_Data)
+
+Filtered_Data = Raw_Data |>
+  filter(!is.na(ImpVol),
+         (Bid != 0 & Ask != 0),
+         !is.na(St),
+         Last.Trade.Date == ODay) |>
+  group_by(U, QuoteTime, Expiry, Strike) |>
+  distinct() |>
+  mutate(ET = if_else(is.na(ET), as.numeric(as.POSIXct(paste0(Expiry, " 16:00:00"))), ET),
+         deltat = time_length(difftime(QuoteTime, ET), unit = "day"),
+         End.Intrinsic = if_else(Type == "c",
+                                 max(0, St - Strike),
+                                 max(0, Strike - St)))
+
+# creating list of exp/qt
+p.c = Filtered_Data |>
+  ungroup() |>
+  group_by(Analog) |>
+  group_split()
+
+group.exp.qt = function(x){
+  x |>
+    ungroup() |>
+    group_by(Expiry, QuoteTime) |>
+    filter(n_distinct(U) != 1) |>
+    mutate(ID = row_number()) |>
+    group_split()
+}
+
+p.c.x = lapply(p.c, group.exp.qt)
+
+Calls = p.c.x[[1]]
+Puts = p.c.x[[2]]
+
+# Make more interpretable
+match.fun = function(J) {
+  X = J |>
+    select(U, Scaled.LM, ID)
+  Y = X |>
+    expand_grid(Comparison = X) |> 
+    filter(U != Comparison$U) |>
+    mutate(Difference = abs(Scaled.LM - Comparison$Scaled.LM)) |>
+    group_by(ID, Comparison_U = Comparison$U) |>
+    slice_min(Difference, n = 1) |>
+    unnest_wider(col = Comparison, names_repair = "unique") |>
+    select(ID = ID...3, Comparison_U, Comparison_ID = ID...6, Difference) |>
+    pivot_wider(names_from = Comparison_U, values_from = Comparison_ID) |>
+    ungroup() 
+  
+  Z = Y |>
+    select(-Difference)
+  
+  row.f = function(r){
+    as.vector(na.omit(as.numeric(r)))
+  }
+  
+  Z = t(apply(Z,1,row.f))
+  
+  Z.s = t(apply(Z,1,sort)) |>
+    as.data.frame() |>
+    duplicated()
+  
+  
+  Y = Y |>
+    filter(!Z.s) 
+  Y = Y |>
+    pivot_longer(cols = 3:dim(Y)[2], values_drop_na = TRUE) 
+  
+  # Need to either do this calculation as a grouped df or map with multiple data frames
+  
+  Q = map2_df(Y$ID, Y$value, ~ {
+    row1 = J[.x, , drop = FALSE]
+    row2 = J[.y, , drop = FALSE]
+    
+    crow = cbind(row1, row2)
+    
+    colnames(crow) = make.unique(c(colnames(row1), colnames(row2)))
+    
+    return(crow)
+  })
+  
+}  
+
+Matched_Calls = lapply(Calls, match.fun)
+Matched_Puts = lapply(Puts, match.fun)
+
+all_calls = do.call(rbind, Matched_Calls) 
+all_puts = do.call(rbind, Matched_Puts)
+
+all_data = rbind(all_calls, all_puts) |>
+  mutate(Time_Period = paste(ODay, Expiry, sep = ","))
+
+period_dates = all_data |> 
+  pull(Time_Period) |>
+  unique() |>
+  as.list()
+
+period.stats.fun = function(x) {
+  d1 = substr(x, 1, 10)
+  d2 = substr(x, 12, 22)
+  dates = window(QQQ$QQQ.Close, start = d1, end = d2)
+  Period_Return = drop(coredata(last(dates)))/drop(coredata(first(dates)))-1
+  Period_Vol = drop(coredata(StdDev.annualized(Return.calculate(dates))))
+  
+  data.frame(x, Period_Return, Period_Vol) |>
+    rename("Time_Period" = x)
+}
+
+Period_Stats = lapply(period_dates, period.stats.fun) 
+Period_Stats = do.call(rbind, Period_Stats) 
+rownames(Period_Stats) = NULL
+Period_Stats = Period_Stats |>
+  mutate(Period_Vol = if_else(is.na(Period_Vol),
+                              0,
+                              Period_Vol))
+
+all_data = all_data |>
+  left_join(Period_Stats, by = "Time_Period")
+
+
+final_all_data = all_data |>
+  mutate(
+    Ave_IV = (Scaled.ImpVol + Scaled.ImpVol.1) / 2,
+    IV_RV_Dif = Ave_IV - Period_Vol,
+    TTE = abs(deltat),
+    M_Dif = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
+                    (-Scaled.LM + Scaled.LM.1),
+                    (Scaled.LM - Scaled.LM.1)),
+    Rn = row_number(),
+    RP_Dif = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
+                     (-Scaled.RP + Scaled.RP.1),
+                     (Scaled.RP - Scaled.RP.1)),
+    Simple_Ret = (End.Intrinsic - Price)/Price,
+    Simple_Ret.1 = (End.Intrinsic.1 - Price.1)/Price.1,
+    SRet_Dif = abs(Simple_Ret - Simple_Ret.1),
+    LongShort = as.factor(if_else(
+      Scaled.ImpVol < Scaled.ImpVol.1,
+      paste(sub("\\d.*", "", Contract.Name), sub("\\d.*", "", Contract.Name.1), sep = "."),
+      paste(sub("\\d.*", "", Contract.Name.1), sub("\\d.*", "", Contract.Name), sep = "."))),
+    Lambda = delta * (S0 / Price),
+    Lambda.1 = delta.1 * (S0.1 / Price.1),
+    Adjusted.Theta =  theta * (1/Price),
+    Adjusted.Theta.1 = theta.1 * (1/Price.1),
+    Adjusted.Gamma = gama * (S0 / delta),
+    Adjusted.Gamma.1 = gama.1 * (S0.1 / delta.1),
+    Adjusted.Vega = vega * (ImpVol/Price),
+    Adjusted.Vega.1 = vega.1 * (ImpVol.1/Price.1),
+    LS_Ret = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
+                     (-Simple_Ret + Simple_Ret.1)/2,
+                     (Simple_Ret - Simple_Ret.1)/2),
+    IV_Dif = abs(Scaled.ImpVol-Scaled.ImpVol.1),
+    Lambda_Dif = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
+                         (-Lambda + Lambda.1),
+                         (-Lambda.1 + Lambda)),
+    Theta_Dif = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
+                        (-Adjusted.Theta + Adjusted.Theta.1),
+                        (-Adjusted.Theta.1 + Adjusted.Theta)),
+    Gamma_Dif = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
+                        (-Adjusted.Gamma + Adjusted.Gamma.1),
+                        (-Adjusted.Gamma.1 + Adjusted.Gamma)),
+    Vega_Dif = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
+                       (-Adjusted.Vega + Adjusted.Vega.1),
+                       (-Adjusted.Vega.1 + Adjusted.Vega)),
+    LS_Contract = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
+                          paste(Contract.Name.1, Contract.Name),
+                          paste(Contract.Name, Contract.Name.1)),
+    Moneyness = as.factor(if_else(End.Intrinsic > 0 & End.Intrinsic.1 > 0, "Both ITM", ">1 OTM")))
+
+final = final_all_data |>
+  group_by(LS_Contract) |>
+  slice_min(QuoteTime) |>
+  ungroup() |>
+  select(LS_Ret, Scaled.LM, Period_Return:M_Dif, RP_Dif, LongShort, LS_Ret:Moneyness, -LS_Contract, GVar, Analog) |>
+  group_by(GVar, Analog) |>
+  group_split() 
+  
+lnames = c()
+cleaned = list()
+
+for (i in 1:length(final)){
+  x = final[[i]] 
+  datatype = first(x$GVar)
+  Analog = ifelse(first(x$Analog) == "c", "Calls", "Puts")
+  lnames[i] =  paste(datatype, Analog, sep = "_" )
+  cleaned[[i]] = x |>
+    select(-GVar, -Analog)
+  
+}
+
+names(cleaned) = lnames
+
+# Make sure to get rid of all variables that have look ahead bias *wink
+#TTE_Threshold = 3
+M_Dif_Threshold = .005
+Scaled.LM_Threshold = .03
+
+Train_Calls = cleaned$Train_Calls |>
+  filter(M_Dif < M_Dif_Threshold, abs(Scaled.LM) < Scaled.LM_Threshold) |>
+  select(-Period_Return:-IV_RV_Dif, -Moneyness)
+
+Train_Puts = cleaned$Train_Puts |>
+  filter(M_Dif < M_Dif_Threshold, abs(Scaled.LM) < Scaled.LM_Threshold) |>
+  select(-Period_Return:-IV_RV_Dif, -Moneyness)
+
+Test_Calls = cleaned$Test_Calls |>
+  filter(M_Dif < M_Dif_Threshold, abs(Scaled.LM) < Scaled.LM_Threshold) |>
+    select(-Period_Return:-IV_RV_Dif, -Moneyness)
+
+Test_Puts = cleaned$Test_Puts |>
+  filter(M_Dif < M_Dif_Threshold, abs(Scaled.LM) < Scaled.LM_Threshold) |>
+  select(-Period_Return:-IV_RV_Dif, -Moneyness)
+
+
+Call_IV_SD = Train_Calls$IV_Dif |>
+  sd(na.rm = TRUE)
+Put_IV_SD = Train_Puts$IV_Dif |>
+  sd(na.rm = TRUE)
+
+Train_Calls = Train_Calls |>
+  filter(IV_Dif > 2 * Call_IV_SD) |>
+  as.data.frame()
+Test_Calls = Test_Calls |>
+  filter(IV_Dif > 2 * Call_IV_SD)|>
+  as.data.frame()
+Train_Puts = Train_Puts |>
+  filter(IV_Dif > 2 * Put_IV_SD)|>
+  as.data.frame()
+Test_Puts = Test_Puts |>
+  filter(IV_Dif > 2 * Put_IV_SD)|>
+  as.data.frame()
+
+set.seed(123)
+
+#### Data graphs
+
+Call.LS_Ret = hist(Train_Calls$LS_Ret, breaks = 20)
+Call.Lambda_Dif = hist(Train_Calls$Lambda_Dif, breaks = 20)
+Call.Vega_Dif = hist(Train_Calls$Vega_Dif, breaks = 20)
+Call.Scaled.LM = hist(Train_Calls$Scaled.LM, breaks = 20)
+Call.TTE = hist(Train_Calls$TTE, breaks = 20)
+Call.M_Dif = hist(Train_Calls$M_Dif, breaks = 20)
+Call.RP_Dif = hist(Train_Calls$RP_Dif, breaks = 20)
+Call.Theta_Dif = hist(Train_Calls$Theta_Dif, breaks = 20)
+Call.Gamma_Dif = hist(Train_Calls$Gamma_Dif, breaks = 20)
+Call.IV_Dif = hist(Train_Calls$IV_Dif, breaks = 20)
+
+Call.LongShort = Train_Calls |>
+  group_by(LongShort) |>
+  summarise("Number of Trades" = n())
+
+
+Put.LS_Ret = hist(Train_Puts$LS_Ret, breaks = 20)
+Put.Lambda_Dif = hist(Train_Puts$Lambda_Dif, breaks = 20)
+Put.Vega_Dif = hist(Train_Puts$Vega_Dif, breaks = 20)
+Put.Scaled.LM = hist(Train_Puts$Scaled.LM, breaks = 20)
+Put.TTE = hist(Train_Puts$TTE, breaks = 20)
+Put.M_Dif = hist(Train_Puts$M_Dif, breaks = 20)
+Put.RP_Dif = hist(Train_Puts$RP_Dif, breaks = 20)
+Put.Theta_Dif = hist(Train_Puts$Theta_Dif, breaks = 20)
+Put.Gamma_Dif = hist(Train_Puts$Gamma_Dif, breaks = 20)
+Put.LongShort = plot(Train_Puts$LongShort)
+Put.IV_Dif = hist(Train_Puts$IV_Dif, breaks = 20)
+
+Put.LongShort = Train_Puts |>
+  group_by(LongShort) |>
+  summarise("Number of Trades" = n())
+
+#### Interaction FOrest
+
+Call.Model = interactionfor(dependent.variable.name = "LS_Ret", data = Train_Calls, importance = "both", num.trees = 2000 )
+Call.Predictions = predict(Call.Model, data = Test_Calls[,-1])
+
+Call.Effects1 = plotEffects(Call.Model, type = "quant", numpairs = 2)
+Call.Effects2 = plotEffects(Call.Model, type = "qual", numpairs = 2)
+
+
+Call.PPlot = ggplot(data.frame(Predicted = Call.Predictions$predictions, Actual = Test_Calls$LS_Ret),
+       aes(x = Actual, y = Predicted)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+  labs(title = "Random Forest Predictions on LS Trade Return",
+       x = "Actual Values", y = "Predicted Values")
+
+Call_Stats = data.frame(P = Call.Predictions$predictions, A = Test_Calls$LS_Ret) |>
+  mutate(Quadrant = case_when(P > 0 & A >= 0 ~ 1,
+                              P > 0 & A < 0 ~ 2,
+                              P < 0 & A <= 0 ~ 3,
+                              P < 0 & A > 0 ~ 4)) |>
+  group_by(Quadrant) |>
+  summarise(Count = n(),
+            Average.P = mean(P),
+            Average.A = mean(A),
+            StD.P = sd(P),
+            StD.A = sd(A))
+
+Put.Model = interactionfor(dependent.variable.name = "LS_Ret", data = Train_Puts, importance = "both", num.trees = 3000 )
+Put.Predictions = predict(Put.Model, data = Test_Puts[,-1])
+
+Put.Effects1 = plotEffects(Put.Model, type = "quant", numpairs = 2)
+Put.Effects2 = plotEffects(Put.Model, type = "qual", numpairs = 2)
+
+Put.PPlot = ggplot(data.frame(Predicted = Put.Predictions$predictions, Actual = Test_Puts$LS_Ret),
+       aes(x = Actual, y = Predicted)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+  labs(title = "Random Forest Predictions on LS Trade Return",
+       x = "Actual Values", y = "Predicted Values")
+
+Put_Stats = data.frame(P = Put.Predictions$predictions, A = Test_Puts$LS_Ret) |>
+  mutate(Quadrant = case_when(P > 0 & A >= 0 ~ 1,
+                              P > 0 & A < 0 ~ 2,
+                              P < 0 & A <= 0 ~ 3,
+                              P < 0 & A > 0 ~ 4)) |>
+  group_by(Quadrant) |>
+  summarise(Count = n(),
+            Average.P = mean(P),
+            Average.A = mean(A),
+            StD.P = sd(P),
+            StD.A = sd(A))
+
+#### Post Mortem Results
+
+Train_Calls1 = cleaned$Train_Calls |>
+  filter(M_Dif < M_Dif_Threshold, abs(Scaled.LM) < Scaled.LM_Threshold) |>
+  select(-IV_RV_Dif, -Moneyness)
+
+Train_Puts1 = cleaned$Train_Puts |>
+  filter(M_Dif < M_Dif_Threshold, abs(Scaled.LM) < Scaled.LM_Threshold) |>
+  select(-IV_RV_Dif, -Moneyness)
+
+Train_Calls1 = Train_Calls1 |>
+  filter(IV_Dif > 2 * Call_IV_SD) |>
+  as.data.frame()
+Train_Puts1 = Train_Puts1 |>
+  filter(IV_Dif > 2 * Put_IV_SD)|>
+  as.data.frame()
+
+post.calls = interactionfor(dependent.variable.name = "LS_Ret", data = Train_Calls1, importance = "both", num.trees = 2000 )
+
+p.c.e = plotEffects(post.calls, type = "quant", numpairs = 2)
+
+post.puts = interactionfor(dependent.variable.name = "LS_Ret", data = Train_Puts1, importance = "both", num.trees = 2000 )
+
+
+p.p.e = plotEffects(post.puts, type = "quant", numpairs = 2)
+```
+
 ## Background
 
 With options on Leveraged Exchange Traded Funds (LETFs), an important factor to consider is the relationship to the ...
@@ -17,11 +546,11 @@ With options on Leveraged Exchange Traded Funds (LETFs), an important factor to 
 
 The data for this research has been sourced via web scraping Yahoo!Finance.I have found the quotes they provide are accurate enough for this type of rough analysis. In future I hope to get higher quality historical data. 
 
-The period in question for the training data for the model is from "rvar" to "rvar". The testing data is from "rvar" to "rvar".
+The period in question for the training data for the model is from `r train_date1` to `r train_date2`. The testing data is from `r test_date1` to `r test_date2`.
 
 ## Model
 
-I chose to use a random forest ensemble as it is more flexible then generalized linear models. I use the package diversityForest for creating a random forest with interaction effects. I also use a non-interaction based random forest to find the importance of each variable. 
+I chose to use a random forest ensemble as it is more flexible then generalized linear models. I use the package diversityForest for creating a random forest with interaction effects.
 
 ## Variable Creation
 
@@ -29,7 +558,7 @@ The data I have for this period is at 15 minute intervals daily. I condense this
 
 From the quoted contract, a plethora of variables are created. Keep in mind that all of these variables will be scaled properly to their leverage factor and underlying price in order to be able to compare across assets. For example, in order to compare $\Delta$ I multiply by (S/V) where S is the price of the underlying and V is the price of the option. Essentially this provides the percent change of the option for a percent change in the underlying. 
 
-With this methodology we compute scaled versions of: delta, theta, gamma, vega, implied volatility, moneyness, and a relative pricing measure (RP) that is the time value of the option divided by the underlying price.
+With this methodology we compute scaled versions of: $\Delta$, $\Theta$, $\Gamma$, $V$ (Vega), implied volatility, moneyness, and a relative pricing measure (RP) that is the value of the option divided by the underlying price.
 
 Additionally, a variable called "Analog" was created to account for how a call on a inverse leverage ETF is equivalent to a put on a positive leverage ETF*. Essentially, it just ensures a put on SQQQ is compared against a call from TQQQ or QQQ.
 
@@ -37,23 +566,137 @@ Additionally, a variable called "Analog" was created to account for how a call o
 
 The main focus of preparing the data was to match each contract to the most similar contract across the other LETF/ETF. So the matching criteria was the same expiration date, same analog, same time of quote, and then the closest available moneyness. This unfortunately leaves some contracts with not particularly good matches, but this is dealt with by arbitrarily filtering the data prior to training the model. More on that later. 
 
-For each pairing of contracts, whichever has the lower(higher) implied volatility is labeled "long"("short"). The difference in IV is then calculated in addition to the difference in the variables mentioned above. Note that none of these variables introduce look ahead bias as they are calculated using the information at the time of the quote, not expiration.
+For each pairing of contracts, whichever has the lower(higher) implied volatility is labeled "long"("short"). The difference in IV is then calculated in addition to the difference in the variables mentioned above. Note that none of these variables introduce look ahead bias as they are calculated using the information at the time of the quote, not expiration. 
 
 Next, for each contract, the return is calculated by using the price of the option at observation and the intrinsic value at expiration. Then for the pair of contracts, the return of the long/short trade is calculated as such: (return of long contract - 1 * return of short contract) / 2. By this methodology, the portfolio constructed has zero cost as you would be long and short the same dollar amount. In this theoretical framework that is fine, but it is important to note that when actually trading the contracts, getting the same dollar exposure can be more difficult when considering trade size limits and other factors. 
 
+
+
 ## The Final Data
 
-There are a few other considerations with the data prior to training the model. The first is that during the training period, the data cannot have more than one trade with the same long/short contracts.In this case, if there would be two or more of the same contracts traded, the trade that has the longest time to expiration is used. This was done in an effort to eliminate some redundancy in the data. Then for the remaining data, it is filtered on three criteria: the absolute value of the scaled log moneyness of the long contract must be less than 0.025 (proxy for near the money), the difference in moneyness between the contracts must be less than 0.005, and finally, the standard deviation of the difference in implied volatilities for the remaining observations is calculated and then all observations with less than two times the standard deviation are discarded. 
+There are a few other considerations with the data prior to training the model. The first is that during the training period, the data cannot have more than one trade with the same long/short contracts.In this case, if there would be two or more of the same contracts traded, the trade that has the longest time to expiration is used. This was done in an effort to eliminate some redundancy in the data. Then for the remaining data, it is filtered on three criteria: the absolute value of the scaled log moneyness of the long contract must be less than `r M_Dif_Threshold` (proxy for near the money), the difference in moneyness between the contracts must be less than `r Scaled.LM_Threshold`, and finally, the standard deviation of the difference in implied volatilities for the remaining observations is calculated and then all observations with less than two times the standard deviation are discarded. 
 
-This last filtering criteria obviously introduces some bias to the training data, but this is acceptable as we use the same value for the standard deviation when filtering the testing data which introduces no new information to the data as the standard deviation is based off of historical data not in the testing period.
+This last filtering criteria obviously introduces some bias to the training data, but this is acceptable as we use the same value for the standard deviation when filtering the testing data which introduces no new information to the data as the standard deviation is based off of historical data prior to the testing period.
 
 ## Non-model Descriptive Statistics {.tabset}
+
+Here we have the distributions of each variable that are used to train the model. Note that Lambda is the adjusted delta.
+
+You can see how most of the trades are initially neutral in terms of greeks. (for difference in variables, the variable of the short contract is subtracted from the long contract)
+
 ### Call Analogs
 
+```{r, message=FALSE, warning=FALSE, echo=FALSE, fig.show='hold', out.width="50%"}
+
+par(mar = (5,5, .1, .1))
+plot(Call.LS_Ret)
+plot(Call.Lambda_Dif)
+plot(Call.Vega_Dif)
+plot(Call.Scaled.LM)
+plot(Call.TTE)
+plot(Call.M_Dif)
+plot(Call.RP_Dif)
+plot(Call.Theta_Dif)
+plot(Call.Gamma_Dif)
+plot(Call.IV_Dif)
+
+Call.LongShort
+
+
+
+```
+
+
 ### Put Analogs
+```{r, message=FALSE, warning=FALSE, echo=FALSE, fig.show='hold', out.width="50%"}
+
+par(mar = c(5,5, .1, .1))
+plot(Put.LS_Ret)
+plot(Put.Lambda_Dif)
+plot(Put.Vega_Dif)
+plot(Put.Scaled.LM)
+plot(Put.TTE)
+plot(Put.M_Dif)
+plot(Put.RP_Dif)
+plot(Put.Theta_Dif)
+plot(Put.Gamma_Dif)
+plot(Put.IV_Dif)
+
+Put.LongShort
 
 
 
+```
 
 
 
+## {-}
+
+## Model Statistics {.tabset}
+
+Below you will see information on the model as well as its predictions. A more thorough analysis of its accuracy will occur when more data is available.
+
+### Call Analogs
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, fig.align='center'}
+
+Call.Model
+
+plot(Call.Effects1)
+
+plot(Call.Effects2)
+
+plot(Call.PPlot)
+
+Call_Stats
+
+```
+ 
+
+### Put Analogs
+```{r, message=FALSE, warning=FALSE, echo=FALSE, fig.align='center'}
+
+Put.Model
+
+plot(Put.Effects1)
+
+plo(Put.Effects2)
+
+plot(Put.PPlot)
+
+Put_Stats
+
+```
+
+##{-}
+
+Above in the prediction summary table, the two quadrants that we really want to focus on are I and II. They represent trades that the model says to enter into. Quadrant I being a correct prediction, and II being incorrect. Ideally, when a sufficient amount of data is collected, we can tune the model to as to theoretically maximize its expected return over a trading period. 
+
+Below we have a model that is fitted with the same observations as the original training data, however, the underlying index return and the realized volatility for the trade time frame are added to see how it effects the predictions.
+
+The new model statistics and main interaction plots are shown.
+
+## Post-Mortem {.tabset}
+
+### Calls
+```{r, message=FALSE, warning=FALSE, echo=FALSE, fig.align='center'}
+post.calls
+
+plot(p.c.e)
+```
+### Puts
+```{r, message=FALSE, warning=FALSE, echo=FALSE, fig.align='center'}
+post.puts
+
+plot(p.p.e)
+```
+##{-}
+
+We see from the above that adding in this period data increases the accuracy of the model as expected, and the interaction plots are actually quite intuitive and nicely display some properties of options.
+
+## Concluding Remarks
+
+Glancing through the results, I find what is here so far quite promising. In general, the quasi-arbitrage strategy involving the implied volatility across the underlying seems to be a profitable trade. Due to the non-perfect relationship across LETF IVs, we do see some negative returns when the long contract expires OTM and the short contract expires ITM. This is an interesting area of the data to explore to see what situations lead to this.  
+
+The one concern I currently have is how the model predictions hold up in different return environments, ie high volatility, prolonged positive vs negative underlying index returns. Theoretically, this strategy should be directionally agnostic as in essence it is long and short straddles (the strategy places trades simultaneously on calls and puts). We see above that the majority of the returns come from the trades on calls. This makes sense as the underlying increased throughout the training and testing period, which renders most puts worthless as they expired out of the money. Another interesting avenue to explore would be the timing of the exit of each position. Holding each pair of contracts to expiration may actually be sub-optimal as the realtionship of implied volatility between contracts could flip sometime during the options life. This would represent a more profitable exit than if held to maturity, given the IVs converge at expiration.  
+ 
