@@ -15,7 +15,7 @@ time_str = "12:30:00 PM" #Midday quotes
 
 # partitioning test/training data
 train_date1 = "2023-10-29"
-train_date2 = Sys.Date() - 50
+train_date2 = Sys.Date() - 25
 
 test_date1 = train_date2 +1
 test_date2 = Sys.Date()
@@ -72,7 +72,7 @@ rm(testing_data)
 rm(training_data)
 
 all_data = all_data |>
-  mutate(RP = (Price - Intrinsic) / Strike,
+  mutate(RP = (Price) / Strike,
          Scaled.RP = if_else(abs(B) > 1, RP/abs(B), RP),
          Intrinsic = if_else(Intrinsic < 0, 0, Intrinsic),
          Midday = as.numeric(as.POSIXct(paste(ODay,time_str), format = "%Y-%m-%d %I:%M:%S %p")))
@@ -347,7 +347,7 @@ final_all_data = all_data |>
 
 final = final_all_data |>
   group_by(LS_Contract) |>
-  slice_min(QuoteTime) |>
+  # slice_min(QuoteTime) |>
   ungroup() |>
   select(LS_Ret, Scaled.LM, Period_Return:M_Dif, RP_Dif, LongShort, LS_Ret:Moneyness, -LS_Contract, GVar, Analog) |>
   group_by(GVar, Analog) |>
@@ -369,8 +369,9 @@ for (i in 1:length(final)){
 names(cleaned) = lnames
 
 # Make sure to get rid of all variables that have look ahead bias *wink
+#TTE_Threshold = 3
 M_Dif_Threshold = .005
-Scaled.LM_Threshold = .025
+Scaled.LM_Threshold = .03
 
 Train_Calls = cleaned$Train_Calls |>
   filter(M_Dif < M_Dif_Threshold, abs(Scaled.LM) < Scaled.LM_Threshold) |>
@@ -407,16 +408,26 @@ Test_Puts = Test_Puts |>
   filter(IV_Dif > 2 * Put_IV_SD)|>
   as.data.frame()
 
-set.seed(100)
+set.seed(123)
+
+#### Data graphs
+
+Call.LS_Ret = hist(Train_Calls$LS_Ret, breaks = 20)
+Call.Lambda_Dif = hist(Train_Calls$Lambda_Dif, breaks = 20)
+Call.Vega_Dif = hist(Train_Calls$Vega_Dif, breaks = 20)
+
+Put.LS_Ret = hist(Train_Puts$LS_Ret, breaks = 20)
+Put.Lambda_Dif = hist(Train_Puts$Lambda_Dif, breaks = 20)
+Put.Vega_Dif = hist(Train_Puts$Vega_Dif, breaks = 20)
 
 #### Interaction FOrest
 
-Call.Model = interactionfor(dependent.variable.name = "LS_Ret", data = Train_Calls, importance = "both", num.trees = 3000 )
+Call.Model = interactionfor(dependent.variable.name = "LS_Ret", data = Train_Calls, importance = "both", num.trees = 2000 )
 Call.Predictions = predict(Call.Model, data = Test_Calls[,-1])
 
 plot(Call.Model)
 
-ggplot(data.frame(Predicted = Call.Predictions$predictions, Actual = Test_Calls$LS_Ret),
+Call.Predictions = ggplot(data.frame(Predicted = Call.Predictions$predictions, Actual = Test_Calls$LS_Ret),
        aes(x = Actual, y = Predicted)) +
   geom_point() +
   geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
@@ -439,7 +450,7 @@ Call_Stats = data.frame(P = Call.Predictions$predictions, A = Test_Calls$LS_Ret)
 Put.Model = interactionfor(dependent.variable.name = "LS_Ret", data = Train_Puts, importance = "both", num.trees = 3000 )
 Put.Predictions = predict(Put.Model, data = Test_Puts[,-1])
 
-plot(Put.Model)
+put.plots = plot(Put.Model)
 
 ggplot(data.frame(Predicted = Put.Predictions$predictions, Actual = Test_Puts$LS_Ret),
        aes(x = Actual, y = Predicted)) +
