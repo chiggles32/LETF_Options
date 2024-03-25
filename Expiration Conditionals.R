@@ -1,29 +1,16 @@
 #p(LT > L0 |ET > E0)
 
 library(tidyverse)
+library(diversityForest)
 
-Scaling.Function = function(x){
-  out = x |>
-    group_by(U, Type) |>
-    mutate(LM = if_else(Type == "c", log(S0/Strike), log(Strike/S0)),
-           MeanVol = mean(ImpVol, na.rm = TRUE),
-           Scaled.LM = if_else(L == "n", LM, 
-                               (LM/abs(B) + ((.045 * ( abs(B) - 1) + 0) * (t/365.25))/abs(B) + ((abs(B) -1)/2) * (t/365.25) * MeanVol^2)),
-           Scaled.ImpVol = if_else(L == "y", ImpVol/abs(B), ImpVol)) |>
-    ungroup()
-  out
+# Data functions
+ret.gen = function(x){
   
-}
-
-a = function(x){
+  #x is a vector of c(days, rf, vol) in annual terms
   
-  #x is a vector of c(days, rf, vol) in daily terms
-  
-  etf = rnorm(x[[1]][1], x[[1]][2]/252 , x[[1]][3]/sqrt(252))
+  etf = rnorm(x[1], x[2]/252 , x[3]/sqrt(252))
   letf = 3*etf
   setf = -3*etf
-  
-  y = sd(etf)
   
   etf = cumprod(1+etf)
   letf = cumprod(1+letf)
@@ -33,78 +20,144 @@ a = function(x){
   
   x = as.numeric(tail(z, n=1))
   
-  x = c(x,y)
-  
   x
 }
 
-
-
-# r = seq(from = 0, to = .1, by = .05)
-r = 0.025
-ti = seq(from = 1, to = 50, by = 1)
-vol = seq(from = .1, to = .5, by = .025)
-
-combinations = as.list(apply(as.data.frame(expand.grid(ti,r, vol)), 1, list))
-
-lfun = function(x){
-  results = as.data.frame(t(replicate(500,a(x)))) |>
-    mutate(ti = x[[1]][1], vol = x[[1]][3], rf = x[[1]][2])
-  names(results) = c("ETF", "LETF", "SETF", "RVol", "Days", "AVol", "Rf")
+data.gen = function(x){
+  results = as.data.frame(t(replicate(750, ret.gen(x)))) |>
+    mutate(Trading_Days = x[1], Annual_Vol = x[3], Rf = x[2])
+  names(results) = c("ETF", "LETF", "SETF", "Days", "AVol", "Rf")
   results
 }
 
-comp = lapply(combinations, lfun)
+# Parameter Creation
+Rf = seq(from = 0, to = .1, by = .025)
+Trading_Days = seq(from = 1, to = 50, by = 2)
+Annual_Vol = seq(from = .1, to = .75, by = .025)
 
-all_data = do.call(rbind, comp) |>
+Parameters = as.list(apply(as.data.frame(expand.grid(Trading_Days,Rf, Annual_Vol)), 1, list))
+
+unname.fun = function(x){
+  x = unname(x[[1]], force = TRUE)
+  x
+}
+Parameters = lapply(Parameters, unname.fun)
+
+#Data creation
+
+raw_data = lapply(Parameters, data.gen)
+
+all_data = do.call(rbind, raw_data) |>
   mutate(ID = row_number())
 
-ed = all_data |>
+rm(raw_data)
+
+adjusted = all_data |>
   pivot_longer(cols = c("ETF", "LETF", "SETF" ), names_to = "underlying", values_to = "EV") |>
   mutate(SM = if_else(underlying == "ETF", 
                       log(EV),
-                      (log(EV)/3 + ((Rf * ( 3 - 1) + 0) * (Days/365.25))/3 + ((3 -1)/2) * (Days/365.25) * AVol^2)),
-         SM = if_else(underlying == "SETF", -SM, SM))
+                      (log(EV)/3 + ((Rf * ( 3 - 1) + 0) * (Days/252))/3 + ((3 -1)/2) * (Days/252) * AVol^2)),
+         SM = if_else(underlying == "SETF", -SM, SM),
+         SM = if_else(Days == 1,
+                      EV,
+                      SM))
+rm(all_data)
 
-info = ed |>
+meta = adjusted |>
   group_by(ID) |>
   filter(row_number() ==1) |>
-  select(RVol, Days, AVol, Rf, ID)
+  select(Days, AVol, Rf, ID)
 
-comb_df = ed |>
-  select(-RVol, -Days, -AVol, -Rf, -EV)
+pairing = adjusted |>
+  select(-Days, -AVol, -Rf, -EV)
 
-paired_df = comb_df |>
-  inner_join(comb_df, by = "ID", relationship = "many-to-many") |>
+paired_df = pairing |>
+  inner_join(pairing, by = "ID", relationship = "many-to-many") |>
   filter(underlying.x != underlying.y) |>
   mutate(UPair = paste0(underlying.x,"-", underlying.y)) |>
   rowwise() |>
   mutate(NID = str_flatten(sort(strsplit(UPair, "")[[1]]))) |>
   ungroup() |>
   group_by(ID, NID) |>
-  filter(row_number()==1)
+  filter(row_number()==1) |>
+  ungroup()
+
+rm(pairing)
+
+paired_df = paired_df |>
+  mutate(`0MC` = if_else(sign(SM.x - 0) > sign(SM.y - 0),
+                        paste0(underlying.x, "-",underlying.y),
+                        if_else(sign(SM.x - 0) < sign(SM.y - 0),
+                                paste0(underlying.y, "-",underlying.x),
+                                "Same")),
+         `.01MC` = if_else(sign(SM.x - .01) > sign(SM.y - .01),
+                           paste0(underlying.x, "-",underlying.y),
+                           if_else(sign(SM.x - .01) < sign(SM.y - .01),
+                                   paste0(underlying.y, "-",underlying.x),
+                                   "Same")),
+         `.02MC` = if_else(sign(SM.x - .02) > sign(SM.y - .02),
+                           paste0(underlying.x, "-",underlying.y),
+                           if_else(sign(SM.x - .02) < sign(SM.y - .02),
+                                   paste0(underlying.y, "-",underlying.x),
+                                   "Same")),
+         `.03MC` = if_else(sign(SM.x - .03) > sign(SM.y - .03),
+                           paste0(underlying.x, "-",underlying.y),
+                           if_else(sign(SM.x - .03) < sign(SM.y - .03),
+                                   paste0(underlying.y, "-",underlying.x),
+                                   "Same")),
+         `.04MC` = if_else(sign(SM.x - .04) > sign(SM.y - .04),
+                           paste0(underlying.x, "-",underlying.y),
+                           if_else(sign(SM.x - .04) < sign(SM.y - .04),
+                                   paste0(underlying.y, "-",underlying.x),
+                                   "Same")),
+         `-.01MC` = if_else(sign(SM.x + .01) > sign(SM.y + .01),
+                           paste0(underlying.x, "-",underlying.y),
+                           if_else(sign(SM.x + .01) < sign(SM.y + .01),
+                                   paste0(underlying.y, "-",underlying.x),
+                                   "Same")),
+         `-.02MC` = if_else(sign(SM.x + .02) > sign(SM.y + .02),
+                           paste0(underlying.x, "-",underlying.y),
+                           if_else(sign(SM.x + .02) < sign(SM.y + .02),
+                                   paste0(underlying.y, "-",underlying.x),
+                                   "Same")),
+         `-.03MC` = if_else(sign(SM.x + .03) > sign(SM.y + .03),
+                           paste0(underlying.x, "-",underlying.y),
+                           if_else(sign(SM.x + .03) < sign(SM.y + .03),
+                                   paste0(underlying.y, "-",underlying.x),
+                                   "Same")),
+         `-.04MC` = if_else(sign(SM.x + .04) > sign(SM.y + .04),
+                           paste0(underlying.x, "-",underlying.y),
+                           if_else(sign(SM.x + .04) < sign(SM.y + .04),
+                                   paste0(underlying.y, "-",underlying.x),
+                                   "Same")))
          
-paired_df |>
+long_df = paired_df |>
+  pivot_longer(cols = `0MC`:`-.04MC`, names_to = "Contract_Moneyness") |>
+  mutate(Contract_Moneyness = as.numeric(gsub("MC", "", Contract_Moneyness)))
+
+rm(paired_df)
+
+long_df |>
   ungroup() |>
   group_by(UPair) |>
   summarise(count = n())
 
-final_df = paired_df |>
-  left_join(info, by = "ID") |>
+final_df = long_df |>
+  left_join(meta, by = "ID") |>
   ungroup() |>
   select(-underlying.x, -underlying.y, -ID, -NID) 
-  
-comp_df = final_df |>
-  mutate(Difs = if_else(sign(SM.x) != sign(SM.y), "1 OTM", "Same M"))
 
-
-comps = comp_df |>
-  group_by(Days,AVol, Difs) |>
+comps = final_df |>
+  group_by(Days,AVol, Rf, Contract_Moneyness, value) |>
   summarize(Obs = n()) |>
-  pivot_wider(id_cols = c("Days", "AVol"), names_from = "Difs", values_from = "Obs") |>
-  mutate(MMR = `1 OTM`/`Same M`) |>
-  select(Days, AVol, MMR) |>
-  ungroup()
+  ungroup() |>
+  group_by(Days, AVol, Rf, Contract_Moneyness) |>
+  mutate(MMR = Obs/sum(Obs))|>
+  filter(value != "Same") |>
+  select(-Obs)
+
+P_Out_And_In = interactionfor(dependent.variable.name = "MMR", data = comps, importance = "both", num.trees = 2000)
+
 
 ggplot(comps, aes(x = Days, y = AVol, z = MMR)) +
   geom_contour_filled() +
