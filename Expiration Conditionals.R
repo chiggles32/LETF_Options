@@ -1,7 +1,8 @@
 #p(LT > L0 |ET > E0)
 
 library(tidyverse)
-library(diversityForest)
+# library(diversityForest)
+library(tidymodels)
 
 # Data functions
 ret.gen = function(x){
@@ -24,14 +25,14 @@ ret.gen = function(x){
 }
 
 data.gen = function(x){
-  results = as.data.frame(t(replicate(750, ret.gen(x)))) |>
+  results = as.data.frame(t(replicate(1000, ret.gen(x)))) |>
     mutate(Trading_Days = x[1], Annual_Vol = x[3], Rf = x[2])
   names(results) = c("ETF", "LETF", "SETF", "Days", "AVol", "Rf")
   results
 }
 
 # Parameter Creation
-Rf = seq(from = 0, to = .1, by = .025)
+Rf = seq(from = 0, to = .07, by = .015)
 Trading_Days = seq(from = 1, to = 50, by = 2)
 Annual_Vol = seq(from = .1, to = .75, by = .025)
 
@@ -156,10 +157,28 @@ comps = final_df |>
   filter(value != "Same") |>
   select(-Obs)
 
-P_Out_And_In = interactionfor(dependent.variable.name = "MMR", data = comps, importance = "both", num.trees = 2000)
+comps = comps |>
+  mutate(value = as.factor(value)) |>
+  ungroup()
 
+lm1 = lm(MMR~Rf*Days*Contract_Moneyness*AVol*value, data = comps)
+lm2 = lm(MMR~poly(Rf, 3)*poly(Days, 3)*poly(Contract_Moneyness, 2)*poly(AVol, 2)*value, data = comps)
+
+summary(lm1)
+summary(lm2)
+
+p1 = predict(lm1, newdata = comps[,-6])
+p2 = predict(lm2, newdata = comps[,-6])
+
+plot(p1, comps$MMR)
+plot(p2, comps$MMR)
+
+# rf1 = interactionfor(dependent.variable.name = "MMR", data = comps, importance = "both", num.trees = 500)
 
 ggplot(comps, aes(x = Days, y = AVol, z = MMR)) +
   geom_contour_filled() +
   scale_color_viridis_c()
 
+saveRDS(lm2, "Linear_Model_for_prob_of_loss.RDS")
+
+hist(rcauchy(4000, 0, .01), breaks = 30)

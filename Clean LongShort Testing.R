@@ -5,7 +5,6 @@ library(PerformanceAnalytics)
 library(quantmod)
 library(lubridate)
 library(diversityForest)
-# library(ranger)
 
 ####Some Initial Meta Data####
 
@@ -15,9 +14,9 @@ time_str = "12:30:00 PM" #Midday quotes
 
 # partitioning test/training data
 train_date1 = "2023-10-29"
-train_date2 = Sys.Date() - 25
+train_date2 = "2024-03-05"
 
-test_date1 = train_date2 +1
+test_date1 = "2024-03-25"
 test_date2 = Sys.Date()
 
 #Calendar for trading days
@@ -40,11 +39,13 @@ index = underlying |>
   pull(U)
 
 ####Initial Data Pull####
-pull.data.function = function(x){
-  path = paste0("Options_Pull_", x)
+pull.data.function = function(x,y){
+  path = paste0(x,"Options_Pull_", y)
   out = read.csv(path)
   out
 }
+
+
 
 training_data = lapply(train_days, pull.data.function)
 
@@ -343,13 +344,35 @@ final_all_data = all_data |>
     LS_Contract = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
                           paste(Contract.Name.1, Contract.Name),
                           paste(Contract.Name, Contract.Name.1)),
-    Moneyness = as.factor(if_else(End.Intrinsic > 0 & End.Intrinsic.1 > 0, "Both ITM", ">1 OTM")))
+    Moneyness = as.factor(if_else(End.Intrinsic > 0 & End.Intrinsic.1 > 0, "Both ITM", ">1 OTM")),
+    Vega_Weight = Adjusted.Vega / Adjusted.Vega.1,
+    Theta_Weight = Adjusted.Theta / Adjusted.Theta.1,
+    Lambda_Weight = Lambda / Lambda.1,
+    Gamma_Weight = Adjusted.Gamma / Adjusted.Gamma.1,
+    IV_Weight = Scaled.ImpVol / Scaled.ImpVol.1,
+    VW_Ret = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
+                     (-(Simple_Ret / Vega_Weight) + Simple_Ret.1 ) / (1 + 1 / Vega_Weight),
+                     ((Simple_Ret / Vega_Weight) - Simple_Ret.1) / (1 + 1 / Vega_Weight)),
+    TW_Ret = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
+                     (-(Simple_Ret / Theta_Weight) + Simple_Ret.1) / (1 + 1 / Theta_Weight) ,
+                     ((Simple_Ret / Theta_Weight) - Simple_Ret.1) / (1 + 1 / Theta_Weight)),
+    LW_Ret = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
+                 (-(Simple_Ret / Lambda_Weight) + Simple_Ret.1) / (1 + 1 / Lambda_Weight),
+                 ((Simple_Ret / Lambda_Weight) - Simple_Ret.1) / (1 + 1 / Lambda_Weight)),
+    GW_Ret = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
+                     (-(Simple_Ret / Gamma_Weight) + Simple_Ret.1) / (1 + 1 / Gamma_Weight),
+                     ((Simple_Ret / Gamma_Weight) - Simple_Ret.1) / (1 + 1 / Gamma_Weight)),
+    IW_Ret = if_else(Scaled.ImpVol > Scaled.ImpVol.1,
+                     (-(Simple_Ret / IV_Weight) + Simple_Ret.1) / (1 + 1 / IV_Weight),
+                     ((Simple_Ret / IV_Weight) - Simple_Ret.1) / (1 + 1 / IV_Weight))
+    
+    )
 
 final = final_all_data |>
   group_by(LS_Contract) |>
-  slice_min(QuoteTime) |>
+  # slice_min(QuoteTime) |>
   ungroup() |>
-  select(LS_Ret, Scaled.LM, Period_Return:M_Dif, RP_Dif, LongShort, LS_Ret:Moneyness, -LS_Contract, GVar, Analog) |>
+  select(LS_Ret, Scaled.LM, Period_Return:M_Dif, RP_Dif, LongShort, LS_Ret:Moneyness, -LS_Contract, GVar, Analog, Ave_IV, Expiry, VW_Ret, TW_Ret, LW_Ret, GW_Ret, IW_Ret ) |>
   group_by(GVar, Analog) |>
   group_split() 
   
@@ -373,21 +396,26 @@ names(cleaned) = lnames
 M_Dif_Threshold = .005
 Scaled.LM_Threshold = .03
 
+# loading in conditional model
+setwd("C:/Users/Charlie/Desktop/LETF_Options")
+conditional_model = readRDS("Linear_Model_for_prob_of_loss.RDS")
+
+
 Train_Calls = cleaned$Train_Calls |>
   filter(M_Dif < M_Dif_Threshold, abs(Scaled.LM) < Scaled.LM_Threshold) |>
-  select(-Period_Return:-IV_RV_Dif, -Moneyness)
+  select(-Period_Return:-IV_RV_Dif, -Moneyness, Ave_IV, VW_Ret, TW_Ret, LW_Ret, GW_Ret, IW_Ret)
 
 Train_Puts = cleaned$Train_Puts |>
   filter(M_Dif < M_Dif_Threshold, abs(Scaled.LM) < Scaled.LM_Threshold) |>
-  select(-Period_Return:-IV_RV_Dif, -Moneyness)
+  select(-Period_Return:-IV_RV_Dif, -Moneyness, Ave_IV, VW_Ret, TW_Ret, LW_Ret, GW_Ret, IW_Ret)
 
 Test_Calls = cleaned$Test_Calls |>
   filter(M_Dif < M_Dif_Threshold, abs(Scaled.LM) < Scaled.LM_Threshold) |>
-    select(-Period_Return:-IV_RV_Dif, -Moneyness)
+    select(-Period_Return:-IV_RV_Dif, -Moneyness, Ave_IV, VW_Ret, TW_Ret, LW_Ret, GW_Ret, IW_Ret)
 
 Test_Puts = cleaned$Test_Puts |>
   filter(M_Dif < M_Dif_Threshold, abs(Scaled.LM) < Scaled.LM_Threshold) |>
-  select(-Period_Return:-IV_RV_Dif, -Moneyness)
+  select(-Period_Return:-IV_RV_Dif, -Moneyness, Ave_IV, VW_Ret, TW_Ret, LW_Ret, GW_Ret, IW_Ret)
 
 
 Call_IV_SD = Train_Calls$IV_Dif |>
@@ -407,6 +435,34 @@ Train_Puts = Train_Puts |>
 Test_Puts = Test_Puts |>
   filter(IV_Dif > 2 * Put_IV_SD)|>
   as.data.frame()
+
+mapping = data.frame("value" = as.factor(c("SETF-ETF", "SETF-LETF", "LETF-ETF", "LETF-SETF", "ETF-SETF", "ETF-LETF")), "TD" = c("SQQQ-QQQ", "SQQQ-TQQQ", "TQQQ-QQQ", "TQQQ-SQQQ", "QQQ-SQQQ", "QQQ-TQQQ"))
+
+train = Train_Calls |>
+  select(Scaled.LM, TTE, LongShort, Ave_IV) |>
+  mutate(Rf = .045,
+         LongShort = as.factor(paste(rev(strsplit(as.character(LongShort), "\\.")[[1]]), collapse = "-"))) |>
+  rename("Days" = TTE, "Contract_Moneyness" = Scaled.LM, "TD" = LongShort, "AVol" = Ave_IV ) |>
+  left_join(mapping, by = "TD") |>
+  select(-TD)
+  
+Conditional_Moneyness = unname(predict(conditional_model, newdata = train), force = TRUE)
+
+Train_Calls = Train_Calls |>
+  cbind(Conditional_Moneyness)
+
+test = Test_Calls |>
+  select(Scaled.LM, TTE, LongShort, Ave_IV) |>
+  mutate(Rf = .045,
+         LongShort = as.factor(paste(rev(strsplit(as.character(LongShort), "\\.")[[1]]), collapse = "-"))) |>
+  rename("Days" = TTE, "Contract_Moneyness" = Scaled.LM, "TD" = LongShort, "AVol" = Ave_IV ) |>
+  left_join(mapping, by = "TD") |>
+  select(-TD)
+
+Conditional_Moneyness = unname(predict(conditional_model, newdata = test), force = TRUE)
+
+Test_Calls = Test_Calls |>
+  cbind(Conditional_Moneyness)
 
 set.seed(123)
 
@@ -444,6 +500,14 @@ Put.LongShort = Train_Puts |>
   group_by(LongShort) |>
   summarise("Number of Trades" = n())
 
+
+###testing other weightings
+
+Test_Calls = Test_Calls |>
+  select(-IW_Ret, -VW_Ret, -GW_Ret, -TW_Ret, -LW_Ret)
+Train_Calls = Train_Calls |>
+  select(-IW_Ret, -VW_Ret, -GW_Ret, -TW_Ret, -LW_Ret)
+
 #### Interaction FOrest
 
 Call.Model = interactionfor(dependent.variable.name = "LS_Ret", data = Train_Calls, importance = "both", num.trees = 2000 )
@@ -473,7 +537,7 @@ Call_Stats = data.frame(P = Call.Predictions$predictions, A = Test_Calls$LS_Ret)
             StD.A = sd(A))
 
 Put.Model = interactionfor(dependent.variable.name = "LS_Ret", data = Train_Puts, importance = "both", num.trees = 3000 )
-Put.Predictions = predict(Put.Model, data = Test_Puts[,-1])
+Put.Predictions = predict(Put.Model, data = Test_Puts)
 
 Put.Effects1 = plotEffects(Put.Model, type = "quant", numpairs = 2)
 Put.Effects2 = plotEffects(Put.Model, type = "qual", numpairs = 2)
@@ -954,3 +1018,104 @@ t.stats = tr |>
 
 new_data = data.frame(IV_Dif = .009, RP_Dif = 0.01, TTE = 50, Scaled.LM = .01)
 predict(model, new_data)
+
+
+
+
+###########################
+
+Train_Calls = cleaned$Train_Calls 
+
+Train_Puts = cleaned$Train_Puts 
+
+Test_Calls = cleaned$Test_Calls 
+
+Test_Puts = cleaned$Test_Puts 
+
+# 
+# Call_IV_SD = Train_Calls$IV_Dif |>
+#   sd(na.rm = TRUE)
+# Put_IV_SD = Train_Puts$IV_Dif |>
+#   sd(na.rm = TRUE)
+
+Train_Calls = Train_Calls |>
+  # filter(IV_Dif > 2 * Call_IV_SD) |>
+  as.data.frame()
+Test_Calls = Test_Calls |>
+  # filter(IV_Dif > 2 * Call_IV_SD)|>
+  as.data.frame()
+Train_Puts = Train_Puts |>
+  # filter(IV_Dif > 2 * Put_IV_SD)|>
+  as.data.frame()
+Test_Puts = Test_Puts |>
+  # filter(IV_Dif > 2 * Put_IV_SD)|>
+  as.data.frame()
+
+mapping = data.frame("value" = as.factor(c("SETF-ETF", "SETF-LETF", "LETF-ETF", "LETF-SETF", "ETF-SETF", "ETF-LETF")), "TD" = c("SQQQ-QQQ", "SQQQ-TQQQ", "TQQQ-QQQ", "TQQQ-SQQQ", "QQQ-SQQQ", "QQQ-TQQQ"))
+
+train = Train_Calls |>
+  select(Scaled.LM, TTE, LongShort, Ave_IV) |>
+  mutate(Rf = .045,
+         LongShort = as.factor(paste(rev(strsplit(as.character(LongShort), "\\.")[[1]]), collapse = "-"))) |>
+  rename("Days" = TTE, "Contract_Moneyness" = Scaled.LM, "TD" = LongShort, "AVol" = Ave_IV ) |>
+  left_join(mapping, by = "TD") |>
+  select(-TD)
+
+Conditional_Moneyness = unname(predict(conditional_model, newdata = train), force = TRUE)
+
+Train_Calls = Train_Calls |>
+  cbind(Conditional_Moneyness)
+
+test = Test_Calls |>
+  select(Scaled.LM, TTE, LongShort, Ave_IV) |>
+  mutate(Rf = .045,
+         LongShort = as.factor(paste(rev(strsplit(as.character(LongShort), "\\.")[[1]]), collapse = "-"))) |>
+  rename("Days" = TTE, "Contract_Moneyness" = Scaled.LM, "TD" = LongShort, "AVol" = Ave_IV ) |>
+  left_join(mapping, by = "TD") |>
+  select(-TD)
+
+Conditional_Moneyness = unname(predict(conditional_model, newdata = test), force = TRUE)
+
+Test_Calls = Test_Calls |>
+  cbind(Conditional_Moneyness)
+
+set.seed(123)
+
+#### Data graphs
+
+Call.LS_Ret = hist(Train_Calls$LS_Ret, breaks = 20)
+Call.Lambda_Dif = hist(Train_Calls$Lambda_Dif, breaks = 20)
+Call.Vega_Dif = hist(Train_Calls$Vega_Dif, breaks = 20)
+Call.Scaled.LM = hist(Train_Calls$Scaled.LM, breaks = 20)
+Call.TTE = hist(Train_Calls$TTE, breaks = 20)
+Call.M_Dif = hist(Train_Calls$M_Dif, breaks = 20)
+Call.RP_Dif = hist(Train_Calls$RP_Dif, breaks = 20)
+Call.Theta_Dif = hist(Train_Calls$Theta_Dif, breaks = 20)
+Call.Gamma_Dif = hist(Train_Calls$Gamma_Dif, breaks = 20)
+Call.IV_Dif = hist(Train_Calls$IV_Dif, breaks = 20)
+
+Call.LongShort = Train_Calls |>
+  group_by(LongShort) |>
+  summarise("Number of Trades" = n())
+
+
+Put.LS_Ret = hist(Train_Puts$LS_Ret, breaks = 20)
+Put.Lambda_Dif = hist(Train_Puts$Lambda_Dif, breaks = 20)
+Put.Vega_Dif = hist(Train_Puts$Vega_Dif, breaks = 20)
+Put.Scaled.LM = hist(Train_Puts$Scaled.LM, breaks = 20)
+Put.TTE = hist(Train_Puts$TTE, breaks = 20)
+Put.M_Dif = hist(Train_Puts$M_Dif, breaks = 20)
+Put.RP_Dif = hist(Train_Puts$RP_Dif, breaks = 20)
+Put.Theta_Dif = hist(Train_Puts$Theta_Dif, breaks = 20)
+Put.Gamma_Dif = hist(Train_Puts$Gamma_Dif, breaks = 20)
+Put.LongShort = plot(Train_Puts$LongShort)
+Put.IV_Dif = hist(Train_Puts$IV_Dif, breaks = 20)
+
+Put.LongShort = Train_Puts |>
+  group_by(LongShort) |>
+  summarise("Number of Trades" = n())
+
+#### Interaction FOrest
+
+Call.Model = interactionfor(dependent.variable.name = "LS_Ret", data = Train_Calls, importance = "both", num.trees = 2000 )
+Call.Predictions = predict(Call.Model, data = Test_Calls[,-1])
